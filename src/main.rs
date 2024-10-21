@@ -6,7 +6,8 @@
 use core::fmt::Write;
 use defmt::unwrap;
 use defmt_rtt as _; // global logger
-use panic_probe as _; // panic handler
+use panic_probe as _; use radio_control::RadioControl;
+// panic handler
 use stm32wlxx_hal::{
     self as hal,
     cortex_m::{self, delay::Delay},
@@ -17,138 +18,53 @@ use stm32wlxx_hal::{
     pac,
     rcc,
     rng::{self, Rng},
-    spi::{SgMiso, SgMosi},
-    subghz::{
-        rfbusys, wakeup, AddrComp, CalibrateImage, CfgIrq, CmdStatus, CodingRate, CrcType,
-        FallbackMode, FskBandwidth, FskBitrate, FskFdev, FskModParams, FskPulseShape,
-        GenericPacketParams, HeaderType, Irq, LoRaBandwidth, LoRaModParams, LoRaPacketParams,
-        LoRaSyncWord, Ocp, PaConfig, PacketType, PktCtrl, PreambleDetection, RampTime, RegMode,
-        RfFreq, SleepCfg, SpreadingFactor, StandbyClk, Startup, Status, StatusMode, SubGhz,
-        TcxoMode, TcxoTrim, Timeout, TxParams,
-    },
+    subghz::{SubGhz},
     uart::{self, Uart1},
     util::new_delay,
 };
 use rtic::app;
 use rtic_monotonics::systick::prelude::*;
 use core::time::Duration;
-use heapless::Vec; // fixed capacity `std::Vec`
+use heapless::{Vec, String}; // fixed capacity `std::Vec`
 
 mod at_command_handler;
+mod radio_control;
 
 systick_monotonic!(Mono, 1000);
 
-const PREAMBLE_LEN: u16 = 16;
-const DATA_LEN: u8 = 255;
-
-const LORA_PACKET_PARAMS: LoRaPacketParams = LoRaPacketParams::new()
-    .set_crc_en(true)
-    .set_preamble_len(PREAMBLE_LEN)
-    .set_payload_len(DATA_LEN)
-    .set_invert_iq(false)
-    .set_header_type(HeaderType::Fixed);
-
-const LORA_MOD_PARAMS: LoRaModParams = LoRaModParams::new()
-    .set_bw(LoRaBandwidth::Bw125)
-    .set_cr(CodingRate::Cr45)
-    .set_ldro_en(true)
-    .set_sf(SpreadingFactor::Sf7);
-
-const PA_CONFIG: PaConfig = PaConfig::LP_10;
-const TX_PARAMS: TxParams = TxParams::LP_10.set_ramp_time(RampTime::Micros40);
-
-const TCXO_MODE: TcxoMode = TcxoMode::new()
-    .set_txco_trim(TcxoTrim::Volts1pt7)
-    .set_timeout(Timeout::from_duration_sat(Duration::from_millis(10)));
-
-fn configure_radio(sg: &mut SubGhz<Dma1Ch1, Dma2Ch1>) {
-    unwrap!(sg.set_standby(StandbyClk::Rc));
-    let status: Status = unwrap!(sg.status());
-    defmt::assert_ne!(status.cmd(), Ok(CmdStatus::ExecutionFailure));
-    defmt::assert_eq!(status.mode(), Ok(StatusMode::StandbyRc));
-
-    unwrap!(sg.set_tcxo_mode(&TCXO_MODE));
-    unwrap!(sg.set_standby(StandbyClk::Hse));
-    let status: Status = unwrap!(sg.status());
-    defmt::assert_ne!(status.cmd(), Ok(CmdStatus::ExecutionFailure));
-    defmt::assert_eq!(status.mode(), Ok(StatusMode::StandbyHse));
-    unwrap!(sg.set_tx_rx_fallback_mode(FallbackMode::StandbyHse));
-
-    unwrap!(sg.set_regulator_mode(RegMode::Ldo));
-    unwrap!(sg.set_buffer_base_address(0, 0));
-    unwrap!(sg.set_pa_config(&PA_CONFIG));
-    unwrap!(sg.set_pa_ocp(Ocp::Max60m));
-    unwrap!(sg.set_tx_params(&TX_PARAMS));
-
-    let status: Status = unwrap!(sg.status());
-    defmt::assert_eq!(status.mode(), Ok(StatusMode::StandbyHse));
-
-    unwrap!(sg.set_lora_sync_word(LoRaSyncWord::Public));
-    unwrap!(sg.set_lora_mod_params(&LORA_MOD_PARAMS));
-    unwrap!(sg.set_lora_packet_params(&LORA_PACKET_PARAMS));
-}
-
-fn write_uart1(uart1: &mut Uart1<pins::B7, (pins::B6, Dma1Ch3)>)
+fn write_str_uart1(uart1: &mut Uart1<pins::B7, pins::B6>, msg:&str)
 {
-    // test func to write device number
-    let devnum: u32 = info::Uid64::read_devnum();
-
-    unwrap!(uart1.bwrite_all(&devnum.to_be_bytes()));
+    uart1.write_str(msg).unwrap();
 }
 
-fn locked_radio_irq_handler(sg: &mut SubGhz<Dma1Ch1, Dma2Ch1> ) 
+fn write_slice_uart1(uart1: &mut Uart1<pins::B7, pins::B6>, msg:&[u8])
 {
-    let (status, irq_status) = unwrap!(sg.irq_status());
-
-        if irq_status & Irq::TxDone.mask() != 0 {
-            defmt::info!("TxDone {}", status);
-            defmt::assert_eq!(status.mode(), Ok(StatusMode::StandbyHse));
-            unwrap!(sg.clear_irq_status(Irq::TxDone.mask()));
-
-        } else if irq_status & Irq::RxDone.mask() != 0 {
-            let (_status, len, ptr) = unwrap!(sg.rx_buffer_status());
-            defmt::info!("RxDone len={} ptr={} {}", len, ptr, status);
-            //unwrap!(sg.read_buffer(
-            //    ptr,
-            //    &mut bytemuck::bytes_of_mut::<[u32; 64]>(buf)[..usize::from(len)]
-            //));
-            unwrap!(sg.clear_irq_status(Irq::RxDone.mask()));            
-        } else if irq_status & Irq::Timeout.mask() != 0 {
-            unwrap!(sg.clear_irq_status(Irq::Timeout.mask()));
-            defmt::error!(
-                "server did not respond to time sync request in {}",
-                Timeout::from_duration_sat(Duration::from_millis(100)).as_duration()
-            );
-            // clear nonce
-            //*time_sync_nonce = 0;
-            // restart timer
-            //lptim1.start(u16::MAX);
-        } else if irq_status & Irq::Err.mask() != 0 {
-            defmt::warn!("Packet error {}", sg.fsk_packet_status());
-            unwrap!(sg.clear_irq_status(Irq::Err.mask()));
-        } else {
-            defmt::error!("Unhandled IRQ: {:#X} {}", irq_status, status);
-            unwrap!(sg.clear_irq_status(irq_status));
-        }
+    uart1.write_str(core::str::from_utf8(msg).unwrap()).unwrap();
 }
 
-#[app(device = stm32wlxx_hal::pac, peripherals = true, dispatchers = [SPI1])]
+fn write_u8_uart1(uart1: &mut Uart1<pins::B7, pins::B6>, char:u8)
+{
+    uart1.write_char(char::from(char)).unwrap();
+}
+
+#[app(device = stm32wlxx_hal::pac, peripherals = true, dispatchers = [USART1])]
 mod app {
     use super::*;
 
     #[shared]
     struct Shared {
-        sg: SubGhz<Dma1Ch1, Dma2Ch1>,
-        uart1: Uart1<pins::B7, (pins::B6, Dma1Ch3)>,
-        rx_buffer: Vec<u8, 512>, // Buffer to store received byte
+        uart1: Uart1<pins::B7, pins::B6>,
         at_cmd_resp_inst: at_command_handler::AtCmdResp,
-        exti: pac::EXTI,
+        radio_inst: radio_control::RadioControl,
     }
 
+    // Locals can only be used by 1 task
     #[local]
     struct Local {
         led1: Output<pins::C0>,
         state: bool,
+        
+        resp_value: at_command_handler::AtCmdStr,
     }
 
     #[init]
@@ -169,10 +85,20 @@ mod app {
                 cs,
             )
         };
+
+        // enable the HSI16 source clock
+        dp.RCC.cr.modify(|_, w| w.hsion().set_bit());
+        while dp.RCC.cr.read().hsirdy().is_not_ready() {}
+
+        // start enabling the LSE clock before we need it
+        unsafe { rcc::pulse_reset_backup_domain(&mut dp.RCC, &mut dp.PWR) };
+        dp.PWR.cr1.modify(|_, w| w.dbp().enabled());
+        // dp.RCC
+        //     .bdcr
+        //     .modify(|_, w| w.lseon().on().lsesysen().enabled());
         
         // Initialize the systick interrupt & obtain the token to prove that we did
-        Mono::start(ctx.core.SYST, 36_000_000); // default STM32F303 clock-rate is 36MHz
-
+        Mono::start(ctx.core.SYST, 48_000_000);
         
         let dma: AllDma = AllDma::split(dp.DMAMUX, dp.DMA1, dp.DMA2, &mut dp.RCC);
 
@@ -183,98 +109,166 @@ mod app {
 
         // Setup LED
         let mut led1: Output<pins::C0> = Output::default(gpioc.c0, cs);
-        led1.set_level(PinState::High);
+        led1.set_level(PinState::Low);
 
         // Setup uart1
-        let mut uart1: Uart1<pins::B7, (pins::B6, Dma1Ch3)> =
-            Uart1::new(dp.USART1, 115200, uart::Clk::Hsi16, &mut dp.RCC)
+        let mut uart1: Uart1<pins::B7, pins::B6> =
+            Uart1::new(dp.USART1, 115_200, uart::Clk::Hsi16, &mut dp.RCC)
                 .enable_rx(gpiob.b7, cs)
-                .enable_tx_dma(gpiob.b6, dma.d1.c3, cs);
+                .enable_tx(gpiob.b6, cs);
 
-        // Test write function
-        write_uart1(&mut uart1);
-
+        // Setup sub GHz radio instance
+        let mut radio_inst = radio_control::RadioControl::new(
+            SubGhz::new(dp.SPI3,  &mut dp.RCC),
+            Output::default(gpiob.b0, cs),
+            Output::default(gpioa.a4, cs),
+            Output::default(gpioa.a5, cs),
+        );
         // Setup LoRa-E5 specific gpio's
-        let mut txcoPwr: Output<pins::B0> = Output::default(gpiob.b0, cs);
-        let mut rfCtrl1: Output<pins::A4> = Output::default(gpioa.a4, cs);
-        let mut rfCtrl2: Output<pins::A5> = Output::default(gpioa.a5, cs);
-
-        let mut sg: SubGhz<Dma1Ch1, Dma2Ch1> = SubGhz::new_with_dma(dp.SPI3, dma.d1.c1, dma.d2.c1, &mut dp.RCC);
-
-        let exti = dp.EXTI;
-
-        configure_radio(&mut sg);
+        radio_inst.power_on();
+        // Configure LoRa radio
+        radio_inst.configure();
 
         // Schedule the blinking task
         blinkTask::spawn().unwrap();
+        usart1_rx_task::spawn().unwrap();
+       
+        let mut at_cmd_resp_inst = at_command_handler::AtCmdResp::new();
+        at_cmd_resp_inst.add_at_cmd(at_command_handler::AtCommandSet::CmdAt, "", false, "");
+        at_cmd_resp_inst.add_at_cmd(at_command_handler::AtCommandSet::CmdAtCsq, "+CSQ", false, "+CSQ:");
+        at_cmd_resp_inst.add_at_cmd(at_command_handler::AtCommandSet::CmdAtGmr, "+GMR", false, "Version:");
+        at_cmd_resp_inst.add_at_cmd(at_command_handler::AtCommandSet::CmdAtId, "+ID", true, "+ID:");
+        at_cmd_resp_inst.add_at_cmd(at_command_handler::AtCommandSet::CmdList, "?", false, "");
+        at_cmd_resp_inst.add_at_cmd(at_command_handler::AtCommandSet::CmdSendMessage, "+SEND", false, "+");
+        at_cmd_resp_inst.add_at_cmd(at_command_handler::AtCommandSet::CmdRadioStatus, "+ST", false, "+");
 
-        // Setup rx buffer
-        let rx_buffer: Vec<u8, 512> = Vec::new();
-        
-        let at_cmd_resp_inst = at_command_handler::AtCmdResp::default();
+        write_str_uart1(&mut uart1, "Enter Command: \n\r");
+        defmt::info!("Startup Complete");
 
         (
             Shared 
-            { 
-                sg, 
-                uart1, 
-                rx_buffer,
+            {
+                uart1,
                 at_cmd_resp_inst,
-                exti
+                radio_inst,
             }, 
-            Local { led1, state: false }
+            Local 
+            {
+                led1, 
+                state: false,
+                resp_value: at_command_handler::AtCmdStr::new(),
+            }
         )
     }
 
+    // Blink task currently used as a visual watchdog
     #[task(
-        local = [led1, state]
+        local = [led1, state],
+        priority = 2,
     )]
-    async fn blinkTask(cx: blinkTask::Context) {
+    async fn blinkTask(mut ctx: blinkTask::Context) {
         loop {
-            //rprintln!("blink");
-            if *cx.local.state {
-                cx.local.led1.set_level_high();
-                *cx.local.state = false;
+
+            if *ctx.local.state {
+                ctx.local.led1.set_level_high();
+                *ctx.local.state = false;
             } else {
-                cx.local.led1.set_level_low();
-                *cx.local.state = true;
+                ctx.local.led1.set_level_low();
+                *ctx.local.state = true;
             }
             Mono::delay(1000.millis()).await;
         }
     }
 
+    // HAL crates does not support RX interrupts. So polling the peripheral instead.
+    //
+    // Attempted to make rx at cmd handling use fn callbacks to grab necessary data. The rust
+    // language is very painful to deal with. Would have had to pass all struct instances into
+    // at_command_handler.
+    #[warn(unused_assignments)]
     #[task(
-        binds = USART1, 
-        shared = [uart1, rx_buffer, at_cmd_resp_inst]
+        shared = [uart1, at_cmd_resp_inst, radio_inst],
+        local = [resp_value],
+        priority = 2,
     )]
-    fn usart1_interrupt(mut ctx: usart1_interrupt::Context) {
-        (
-            ctx.shared.uart1,
-            ctx.shared.rx_buffer,
-            ctx.shared.at_cmd_resp_inst,
-        )
-        .lock(|uart1, rx_buffer, at_cmd_resp_inst| {
-            if let Ok(received_byte) = uart1.read() {
-                // Store the received byte in the buffer
-                rx_buffer.push(received_byte).unwrap();
+    async fn usart1_rx_task(mut ctx: usart1_rx_task::Context) {
+        loop {
+            ctx.shared.uart1.lock(|uart1| {
+                if let Ok(received_byte) = uart1.read() {
+                    ctx.shared.at_cmd_resp_inst.lock(|at_cmd_resp_inst| {
+                        // Handle inbound character
+                        let rx_cmd_enum = at_cmd_resp_inst.handle_command(received_byte);
 
-                // TODO - move rx buffer inside cmd resp
-                //      - if ahndle cmd retrn true, figure out how to queue response 
+                        // Handle parsed AT commands
+                        match rx_cmd_enum {
+                            at_command_handler::AtCommandSet::CmdNewLine => {                                
+                                // Send character: >
+                                write_str_uart1(uart1, "\n\r>");
+                            }
+                            at_command_handler::AtCommandSet::CmdAt => {                                
+                                // Send generic AT response
+                                write_slice_uart1(uart1, at_cmd_resp_inst.prepare_response(rx_cmd_enum, ctx.local.resp_value));
+                            }
+                            at_command_handler::AtCommandSet::CmdAtCsq => {
+                                // Todo - get signal str from radio
+                                ctx.shared.radio_inst.lock(|radio_inst| {
+                                    *ctx.local.resp_value = radio_inst.check_signal_strength();
+                                });
 
-                // Here you could also handle the byte directly (e.g., process it)
-                at_cmd_resp_inst.handle_command(rx_buffer);
-            }
-        });
+                                // Send AT response with value
+                                write_slice_uart1(uart1, at_cmd_resp_inst.prepare_response(rx_cmd_enum, ctx.local.resp_value));
+                            }
+                            at_command_handler::AtCommandSet::CmdSendMessage => {
+                                // Tell radio to TX
+                                ctx.shared.radio_inst.lock(|radio_inst| {
+                                    *ctx.local.resp_value = radio_inst.send_hello_world();
+                                });
+
+                                // Send AT response
+                                write_slice_uart1(uart1, at_cmd_resp_inst.prepare_response(rx_cmd_enum, ctx.local.resp_value));
+                            }
+                            at_command_handler::AtCommandSet::CmdRadioStatus => {
+                                ctx.shared.radio_inst.lock(|radio_inst| {
+                                    *ctx.local.resp_value = radio_inst.get_status();
+                                });
+
+                                // Send AT response
+                                write_slice_uart1(uart1, at_cmd_resp_inst.prepare_response(rx_cmd_enum, ctx.local.resp_value));
+                            }
+                            at_command_handler::AtCommandSet::CmdList => {
+                                // Get list of commands from at_command_handler
+                                *ctx.local.resp_value = at_cmd_resp_inst.get_available_cmds();
+                                // Send generic AT response
+                                write_slice_uart1(uart1, at_cmd_resp_inst.prepare_response(rx_cmd_enum, ctx.local.resp_value));
+                            }
+                            at_command_handler::AtCommandSet::CmdUnknown => {
+                                // Dont do anything for unknowns
+                            }
+                            _ => {
+                                defmt::warn!("usart1_rx_loop: Unhandled at command");
+                            }
+                        }
+                    });
+
+                    // Echo entered characters
+                    write_u8_uart1(uart1, received_byte);
+                };
+            });
+            
+            Mono::delay(10.millis()).await;
+        }
     }
 
+    // Note: RADIO_IRQ_BUSY doesnt work with DMA version of subghz...
     #[task(
         binds = RADIO_IRQ_BUSY,
-        shared = [sg],
+        shared = [radio_inst],
+        priority = 2,
     )]
-    fn radioIrqHandler(mut ctx: radioIrqHandler::Context)
+    fn radio_polling_task(mut ctx: radio_polling_task::Context)
     {
-        ctx.shared.sg.lock(|sg| {
-            locked_radio_irq_handler(sg)
-        });        
+        ctx.shared.radio_inst.lock(|radio_inst| {
+            radio_inst.locked_radio_irq_handler();
+        });    
     }
 }

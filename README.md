@@ -16,6 +16,9 @@ General rust/cargo command to run tests: **(have not added tests yet)**
 Command to load code on platform: **requires probe-rs**
 `cargo flash --release --chip STM32WLE5JC`
 
+Command to load and debug code on platform: **requires probe-rs**
+`cargo embed --release`
+
 ## Usefull links:
 https://jonathanklimt.de/electronics/programming/embedded-rust/rust-on-stm32-2/
 https://github.com/stm32-rs/stm32wlxx-hal/blob/main/testsuite/README.md

@@ -1,0 +1,5 @@
+[default.general]
+chip = "STM32WLE5JC"
+
+[default.rtt]
+enabled = true
