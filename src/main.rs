@@ -6,7 +6,7 @@
 use core::fmt::Write;
 use defmt::unwrap;
 use defmt_rtt as _; // global logger
-use panic_probe as _; use radio_control::RadioControl;
+use panic_probe as _;
 // panic handler
 use stm32wlxx_hal::{
     self as hal,
@@ -24,11 +24,20 @@ use stm32wlxx_hal::{
 };
 use rtic::app;
 use rtic_monotonics::systick::prelude::*;
-use core::time::Duration;
 use heapless::{Vec, String}; // fixed capacity `std::Vec`
 
-mod at_command_handler;
-mod radio_control;
+mod bm_network_stack;
+use bm_network_stack::bm_network_stack::BmNetworkStack as BmNetworkStack;
+mod bm_at_cmd_handler;
+use bm_at_cmd_handler::at_cmd_handler::{
+    AtCmd,
+    AtCmdList,
+    AtCmdResp,
+    AtCmdStr,
+    AtCommandSet
+};
+mod bm_radio_control;
+use bm_radio_control::bm_radio_control::RadioControl as RadioControl;
 
 systick_monotonic!(Mono, 1000);
 
@@ -49,13 +58,16 @@ fn write_u8_uart1(uart1: &mut Uart1<pins::B7, pins::B6>, char:u8)
 
 #[app(device = stm32wlxx_hal::pac, peripherals = true, dispatchers = [USART1])]
 mod app {
+    use bm_radio_control::RadioRxBuffer;
+
     use super::*;
 
     #[shared]
     struct Shared {
         uart1: Uart1<pins::B7, pins::B6>,
-        at_cmd_resp_inst: at_command_handler::AtCmdResp,
-        radio_inst: radio_control::RadioControl,
+        at_cmd_resp_inst: AtCmdResp,
+        radio_inst: RadioControl,
+        mesh_inst: BmNetworkStack,
     }
 
     // Locals can only be used by 1 task
@@ -64,7 +76,7 @@ mod app {
         led1: Output<pins::C0>,
         state: bool,
         
-        resp_value: at_command_handler::AtCmdStr,
+        resp_value: AtCmdStr,
     }
 
     #[init]
@@ -118,7 +130,7 @@ mod app {
                 .enable_tx(gpiob.b6, cs);
 
         // Setup sub GHz radio instance
-        let mut radio_inst = radio_control::RadioControl::new(
+        let mut radio_inst = RadioControl::new(
             SubGhz::new(dp.SPI3,  &mut dp.RCC),
             Output::default(gpiob.b0, cs),
             Output::default(gpioa.a4, cs),
@@ -128,19 +140,17 @@ mod app {
         radio_inst.power_on();
         // Configure LoRa radio
         radio_inst.configure();
+       
+        // Setup AT command handler
+        let mut at_cmd_resp_inst = AtCmdResp::new();
 
-        // Schedule the blinking task
+        // Setup mesh stack
+        let mesh_inst = BmNetworkStack::default();
+        
+        // Start software tasks
         blinkTask::spawn().unwrap();
         usart1_rx_task::spawn().unwrap();
-       
-        let mut at_cmd_resp_inst = at_command_handler::AtCmdResp::new();
-        at_cmd_resp_inst.add_at_cmd(at_command_handler::AtCommandSet::CmdAt, "", false, "");
-        at_cmd_resp_inst.add_at_cmd(at_command_handler::AtCommandSet::CmdAtCsq, "+CSQ", false, "+CSQ:");
-        at_cmd_resp_inst.add_at_cmd(at_command_handler::AtCommandSet::CmdAtGmr, "+GMR", false, "Version:");
-        at_cmd_resp_inst.add_at_cmd(at_command_handler::AtCommandSet::CmdAtId, "+ID", true, "+ID:");
-        at_cmd_resp_inst.add_at_cmd(at_command_handler::AtCommandSet::CmdList, "?", false, "");
-        at_cmd_resp_inst.add_at_cmd(at_command_handler::AtCommandSet::CmdSendMessage, "+SEND", false, "+");
-        at_cmd_resp_inst.add_at_cmd(at_command_handler::AtCommandSet::CmdRadioStatus, "+ST", false, "+");
+        mesh_stack_task::spawn().unwrap();
 
         write_str_uart1(&mut uart1, "Enter Command: \n\r");
         defmt::info!("Startup Complete");
@@ -151,12 +161,13 @@ mod app {
                 uart1,
                 at_cmd_resp_inst,
                 radio_inst,
+                mesh_inst,
             }, 
             Local 
             {
                 led1, 
                 state: false,
-                resp_value: at_command_handler::AtCmdStr::new(),
+                resp_value: AtCmdStr::new(),
             }
         )
     }
@@ -177,6 +188,51 @@ mod app {
                 *ctx.local.state = true;
             }
             Mono::delay(1000.millis()).await;
+        }
+    }
+
+    #[task(
+        shared = [radio_inst, mesh_inst],
+        priority = 2,
+    )]
+    async fn mesh_stack_task(mut ctx: mesh_stack_task::Context) {
+        loop {
+            let mut buffer_available_to_parse: Option<RadioRxBuffer> = None;
+
+            // Pop packet buffer off rx_buffer and free lock before processing
+            ctx.shared.radio_inst.lock(|radio_inst| {
+                if radio_inst.rx_buffer.len() > 0 {
+                    buffer_available_to_parse = radio_inst.rx_buffer.pop();                    
+                }
+            });
+
+            ctx.shared.mesh_inst.lock(|mesh_inst| {
+                // Handle inbound packets
+                if buffer_available_to_parse.is_some() {
+                    let mut buffer_to_parse = buffer_available_to_parse.unwrap();
+                    mesh_inst.process_packet(buffer_to_parse.length, 
+                        &mut buffer_to_parse.buffer, 
+                        buffer_to_parse.rssi);
+                }
+                
+                // Handle outbound packets
+                let outbound_packet = mesh_inst.get_outbound_packet();
+                if outbound_packet.is_some() {
+                    // Create byte buffer for outbound packet
+                    let outbound_buffer_created = outbound_packet.unwrap().to_bytes();
+                    if outbound_buffer_created.is_some() {
+                        // Pull buffer from option
+                        let outbound_buffer = outbound_buffer_created.unwrap();
+                        let length_to_send = outbound_buffer.len().try_into().unwrap(); 
+                        // Initiate TX
+                        ctx.shared.radio_inst.lock(|radio_inst| {
+                            radio_inst.send_packet( length_to_send, outbound_buffer.as_slice());
+                        });
+                    }                    
+                }
+            });
+
+            Mono::delay(100.millis()).await;
         }
     }
 
@@ -201,15 +257,15 @@ mod app {
 
                         // Handle parsed AT commands
                         match rx_cmd_enum {
-                            at_command_handler::AtCommandSet::CmdNewLine => {                                
+                            AtCommandSet::CmdNewLine => {                                
                                 // Send character: >
                                 write_str_uart1(uart1, "\n\r>");
                             }
-                            at_command_handler::AtCommandSet::CmdAt => {                                
+                            AtCommandSet::CmdAt => {                                
                                 // Send generic AT response
                                 write_slice_uart1(uart1, at_cmd_resp_inst.prepare_response(rx_cmd_enum, ctx.local.resp_value));
                             }
-                            at_command_handler::AtCommandSet::CmdAtCsq => {
+                            AtCommandSet::CmdAtCsq => {
                                 // Todo - get signal str from radio
                                 ctx.shared.radio_inst.lock(|radio_inst| {
                                     *ctx.local.resp_value = radio_inst.check_signal_strength();
@@ -218,16 +274,29 @@ mod app {
                                 // Send AT response with value
                                 write_slice_uart1(uart1, at_cmd_resp_inst.prepare_response(rx_cmd_enum, ctx.local.resp_value));
                             }
-                            at_command_handler::AtCommandSet::CmdSendMessage => {
+                            AtCommandSet::CmdAtId => {
+                                // get network id and write to stack
+                            }
+                            AtCommandSet::CmdAtMsg => {
+                                // TODO - prob not the best to put all this logic here. But have no good way to callback here for UI updates.
+                                // Could loop here calling a state machine running in the stack?
+
+                                // Check stack if we have route
+
+                                // Perform network discovery
+
+                                // Send packet
+                            }
+                            AtCommandSet::CmdTestMessage => {
                                 // Tell radio to TX
                                 ctx.shared.radio_inst.lock(|radio_inst| {
-                                    *ctx.local.resp_value = radio_inst.send_hello_world();
+                                    *ctx.local.resp_value = radio_inst.send_test_message();
                                 });
 
                                 // Send AT response
                                 write_slice_uart1(uart1, at_cmd_resp_inst.prepare_response(rx_cmd_enum, ctx.local.resp_value));
                             }
-                            at_command_handler::AtCommandSet::CmdRadioStatus => {
+                            AtCommandSet::CmdRadioStatus => {
                                 ctx.shared.radio_inst.lock(|radio_inst| {
                                     *ctx.local.resp_value = radio_inst.get_status();
                                 });
@@ -235,13 +304,13 @@ mod app {
                                 // Send AT response
                                 write_slice_uart1(uart1, at_cmd_resp_inst.prepare_response(rx_cmd_enum, ctx.local.resp_value));
                             }
-                            at_command_handler::AtCommandSet::CmdList => {
+                            AtCommandSet::CmdList => {
                                 // Get list of commands from at_command_handler
                                 *ctx.local.resp_value = at_cmd_resp_inst.get_available_cmds();
                                 // Send generic AT response
                                 write_slice_uart1(uart1, at_cmd_resp_inst.prepare_response(rx_cmd_enum, ctx.local.resp_value));
                             }
-                            at_command_handler::AtCommandSet::CmdUnknown => {
+                            AtCommandSet::CmdUnknown => {
                                 // Dont do anything for unknowns
                             }
                             _ => {

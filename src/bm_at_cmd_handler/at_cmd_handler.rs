@@ -8,8 +8,9 @@ pub enum AtCommandSet {
     CmdAt,
     CmdAtCsq,
     CmdAtGmr,
-    CmdAtId,    
-    CmdSendMessage,
+    CmdAtId,
+    CmdAtMsg,  
+    CmdTestMessage,
     CmdRadioStatus,
     CmdList
 }
@@ -71,27 +72,41 @@ pub struct AtCmdResp {
 }
 
 impl AtCmdResp {
+    // Constructor which adds all supported AT commands
     pub fn new() -> AtCmdResp {
         AtCmdResp {
             cmd_buffer: AtCmdBuffer::new(),
             resp_buffer: AtCmdBuffer::new(),
             supported_at_cmd: AtCmdList::new(),
         }
-    }    
+        .add_at_cmd(AtCommandSet::CmdAt, "", false, "")
+        .add_at_cmd(AtCommandSet::CmdAtCsq, "+CSQ", false, "+CSQ:")
+        .add_at_cmd(AtCommandSet::CmdAtGmr, "+GMR", false, "Version:")
+        .add_at_cmd(AtCommandSet::CmdAtId, "+ID", true, "+ID:")
+        .add_at_cmd(AtCommandSet::CmdAtMsg, "+MSG", true, "+ID:")
+        .add_at_cmd(AtCommandSet::CmdTestMessage, "+TMSG", false, "+")
+        .add_at_cmd(AtCommandSet::CmdRadioStatus, "+ST", false, "+")
+        .add_at_cmd(AtCommandSet::CmdList, "?", false, "")
+    } 
 
-    pub fn add_at_cmd(&mut self, command_enum: AtCommandSet, command_str: &str, allow_write: bool, response_str: &str) {
+    pub fn add_at_cmd(mut self, command_enum: AtCommandSet, command_str: &str, allow_write: bool, response_str: &str) -> Self {
+        // Create a new AtCmd instance
+        let new_cmd = AtCmd::new(
+            command_enum,
+            String::try_from(command_str).unwrap(),  // Convert str to AtCmdStr
+            allow_write,
+            String::try_from(response_str).unwrap(),  // Convert str to AtCmdStr
+        );
+
+        // Add the new command to the supported commands list
         if self.supported_at_cmd.len() < MAX_AT_CMDS {
-            self.supported_at_cmd.push(
-                AtCmd::new(
-                    command_enum,
-                    String::try_from(command_str).unwrap(),
-                    allow_write,
-                    String::try_from(response_str).unwrap()
-                )
-            ).unwrap();
+            self.supported_at_cmd.push(new_cmd).unwrap();
         } else {
-            defmt::error!("Error: Maximum number of AT commands reached.");
+            // Handle the case where the command list is full, if necessary
+            defmt::error!("Warning: Maximum number of AT commands reached. Cannot add '{}'", command_str);
         }
+
+        self
     }   
 
     pub fn handle_command(&mut self, in_char: u8) -> AtCommandSet {
@@ -142,6 +157,7 @@ impl AtCmdResp {
                         Ok(_) => {
                             if cmd_str.contains(supp_cmd.command_str.trim()) {
                                 // Todo - parse value after =
+                                 
                             }
                         },
                         Err(e) => { 
@@ -150,10 +166,17 @@ impl AtCmdResp {
                     }                    
                 }
 
-                // Todo add check for comd + ?. I.E. AT+CSQ or AT+CSQ?
+                // Check for cmd + ?. I.E. AT+CSQ as AT+CSQ?
+                let mut str_to_match = supp_cmd.command_str.clone();
+                str_to_match.push_str("?").unwrap();
+                if cmd_str == str_to_match {
+                    // TODO - primpt out command help
 
-                // Return matched command
-                if cmd_str == supp_cmd.command_str.trim() {
+                    // Return matched command
+                    command_accepted = supp_cmd.command_enum;
+                }                
+                else if cmd_str == supp_cmd.command_str.trim() {
+                    // Return matched command
                     command_accepted = supp_cmd.command_enum;
                 }
             }
@@ -209,6 +232,6 @@ impl AtCmdResp {
 
     //-----------------------------------------------------------
     // Private functions
-    //-----------------------------------------------------------   
+    //-----------------------------------------------------------    
 
 }

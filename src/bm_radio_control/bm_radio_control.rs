@@ -2,7 +2,6 @@ use defmt::unwrap;
 use defmt_rtt as _; // global logger
 use core::time::Duration;
 use stm32wlxx_hal::{
-    dma::{Dma1Ch1, Dma2Ch1},
     gpio::{pins, Output},
     spi::{SgMiso, SgMosi},
     subghz::{
@@ -12,12 +11,15 @@ use stm32wlxx_hal::{
         LoRaSyncWord, Ocp, PaConfig, PaSel, PacketType, PktCtrl, PreambleDetection, RampTime, RegMode,
         RfFreq, SleepCfg, SpreadingFactor, StandbyClk, Startup, Status, StatusMode, SubGhz,
         TcxoMode, TcxoTrim, Timeout, TxParams,
-    },
+    }, Ratio,
 };
-use heapless::{String}; 
+use heapless::{String, Vec};
+use super::{RadioRxBuffer, RADIO_MAX_BUFF_SIZE};
 
 const PREAMBLE_LEN: u16 = 16;
 const DATA_LEN: u8 = 255;
+const RADIO_RX_BUFFER_SIZE: usize = 3;
+
 
 enum RfSwitchType {
     RfSwitchOff,
@@ -40,11 +42,16 @@ struct RadioConfiguration {
 
 #[derive(Debug)]
 pub struct RadioControl {
+    // Radio HAL library
     radio: SubGhz<SgMiso, SgMosi>,
+    // GPIO's specific to the LoRa-E5 module
     gpio_txco_pwr: Output<pins::B0>,
     gpio_rf_ctrl_1: Output<pins::A4>,
     gpio_rf_ctrl_2: Output<pins::A5>,
+    // LoRa radio configurations
     config: RadioConfiguration,
+    // LoRa radio receieve queue
+    pub rx_buffer: Vec<RadioRxBuffer, RADIO_RX_BUFFER_SIZE>,
 }
 
 impl RadioControl {
@@ -89,6 +96,7 @@ impl RadioControl {
                     .irq_enable_all(Irq::Err)
                     .irq_enable_all(Irq::Timeout),
             },
+            rx_buffer: Vec::new(),
         }
     }
 
@@ -171,7 +179,7 @@ impl RadioControl {
     }
 
     // Todo - figure out return type. Maybe Result<tbd>
-    pub fn send_hello_world(&mut self) -> String<100> {
+    pub fn send_test_message(&mut self) -> String<100> {
         // Load packet in buffer and bytes to send
         if self.do_transmit(b"Hello World", 11).is_ok() {
             String::try_from("Sent").unwrap()
@@ -179,6 +187,10 @@ impl RadioControl {
         else {
             String::try_from("Error").unwrap()
         }        
+    }
+
+    pub fn send_packet(&mut self, length: u8, payload: &[u8]) {
+        self.do_transmit(payload, length);
     }
 
     pub fn get_status(&mut self) -> String<100> {
@@ -217,11 +229,23 @@ impl RadioControl {
             let (_status, len, ptr) = unwrap!(self.radio.rx_buffer_status());
             defmt::info!("RxDone len={} ptr={} {} irq={:#X}", len, ptr, status, irq_status);
 
-            // Todo - what to do with receieved packet??
-            let mut data_read = [0; 255];
-            unwrap!(self.radio.read_buffer( 0, &mut data_read ));
-            defmt::info!("Buffer={}", data_read);
+            // move this to preamble???
+            let rx_rssi = self.radio.rssi_inst();
 
+            if self.rx_buffer.len() >= RADIO_RX_BUFFER_SIZE {
+                defmt::error!("Receive buffer is full!");
+                return
+            }
+
+            // Store in some rx buffer, dont do processing in irq handler
+            let mut receieved_buffer = RadioRxBuffer::new()
+                .with_len(len)
+                .with_rssi(rx_rssi.unwrap().1.to_integer());
+            // Read data from radio into RadioRxBuffer
+            unwrap!(self.radio.read_buffer( 0, &mut receieved_buffer.buffer ));
+            // If the read succeeds push buffer in shared memory space
+            self.rx_buffer.push(receieved_buffer);
+            // Clear IRQ
             unwrap!(self.radio.clear_irq_status(Irq::RxDone.mask()));            
         } else if irq_status & Irq::Timeout.mask() != 0 {
             defmt::warn!("Timeout {}", self.radio.op_error());
