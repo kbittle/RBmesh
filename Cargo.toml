@@ -33,4 +33,4 @@ features = ["critical-section-single-core"]
 
 [dependencies.stm32wlxx-hal]
 version = "0.6.1"
-features = ["stm32wle5", "rt", "defmt"]
+features = ["stm32wle5", "rt", "defmt", "chrono"]

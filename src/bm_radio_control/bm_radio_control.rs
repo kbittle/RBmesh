@@ -1,6 +1,6 @@
-use defmt::unwrap;
+use defmt::{unwrap, write};
 use defmt_rtt as _; // global logger
-use core::time::Duration;
+use core::{default, time::Duration};
 use stm32wlxx_hal::{
     gpio::{pins, Output},
     spi::{SgMiso, SgMosi},
@@ -14,18 +14,38 @@ use stm32wlxx_hal::{
     }, Ratio,
 };
 use heapless::{String, Vec};
-use super::{RadioRxBuffer, RADIO_MAX_BUFF_SIZE};
+use super::bm_radio_rx_buffer::{RadioRxBuffer, RADIO_MAX_BUFF_SIZE};
 
 const PREAMBLE_LEN: u16 = 16;
 const DATA_LEN: u8 = 255;
 const RADIO_RX_BUFFER_SIZE: usize = 3;
-
 
 enum RfSwitchType {
     RfSwitchOff,
     RfSwitchRx,
     RfSwitchTxLp,
     RfSwitchTxHp
+}
+
+#[derive(Default, Debug, Clone, PartialEq)]
+pub enum RadioState {
+    #[default]
+    Idle,
+    Receiving,
+    Transmitting,
+    Failure,
+}
+
+impl defmt::Format for RadioState {
+    fn format(&self, fmt: defmt::Formatter) {
+        match self {
+            RadioState::Idle => write!(fmt, "Idle"),
+            RadioState::Receiving => write!(fmt, "Receiving"),
+            RadioState::Transmitting => write!(fmt, "Transmitting"),
+            RadioState::Failure => write!(fmt, "Failure"),
+            _ => { write!(fmt, "Unknown") }
+        }
+    }
 }
 
 // Structure to store all LoRa radio configurations
@@ -52,6 +72,8 @@ pub struct RadioControl {
     config: RadioConfiguration,
     // LoRa radio receieve queue
     pub rx_buffer: Vec<RadioRxBuffer, RADIO_RX_BUFFER_SIZE>,
+    // Tx/Rx/Idle state
+    pub current_state: RadioState,
 }
 
 impl RadioControl {
@@ -97,6 +119,7 @@ impl RadioControl {
                     .irq_enable_all(Irq::Timeout),
             },
             rx_buffer: Vec::new(),
+            current_state: RadioState::default(),
         }
     }
 
@@ -173,7 +196,7 @@ impl RadioControl {
     pub fn check_signal_strength(&mut self) -> String<100> {
         // check if in rx mode??
 
-        let (stat, rssi) = self.radio.rssi_inst().unwrap();
+        let (_stat, rssi) = self.radio.rssi_inst().unwrap();
 
         String::try_from(rssi.to_integer()).unwrap()
     }
@@ -189,8 +212,8 @@ impl RadioControl {
         }        
     }
 
-    pub fn send_packet(&mut self, length: u8, payload: &[u8]) {
-        self.do_transmit(payload, length);
+    pub fn send_packet(&mut self, length: u8, payload: &[u8]) -> Result<(), &str> {
+        self.do_transmit(payload, length)
     }
 
     pub fn get_status(&mut self) -> String<100> {
@@ -220,14 +243,22 @@ impl RadioControl {
             defmt::assert_eq!(status.mode(), Ok(StatusMode::StandbyHse));
             unwrap!(self.radio.clear_irq_status(Irq::TxDone.mask()));
 
+            self.current_state = RadioState::Idle;
+
             // Go back to RX mode
             self.do_receive();
         } else if irq_status & Irq::PreambleDetected.mask() != 0 {
             defmt::info!("Preamble detect: {:#X} {}", irq_status, status);
-            unwrap!(self.radio.clear_irq_status(Irq::PreambleDetected.mask()));        
+            unwrap!(self.radio.clear_irq_status(Irq::PreambleDetected.mask())); 
+
+            // Set state to receiving to prevent transmitting while radio is mid rx.
+            // Need to add timeout before enabling this feature
+            //self.current_state = RadioState::Receiving;       
         } else if irq_status & Irq::RxDone.mask() != 0 {
             let (_status, len, ptr) = unwrap!(self.radio.rx_buffer_status());
             defmt::info!("RxDone len={} ptr={} {} irq={:#X}", len, ptr, status, irq_status);
+
+            self.current_state = RadioState::Idle;
 
             // move this to preamble???
             let rx_rssi = self.radio.rssi_inst();
@@ -244,12 +275,15 @@ impl RadioControl {
             // Read data from radio into RadioRxBuffer
             unwrap!(self.radio.read_buffer( 0, &mut receieved_buffer.buffer ));
             // If the read succeeds push buffer in shared memory space
-            self.rx_buffer.push(receieved_buffer);
+            self.rx_buffer.push(receieved_buffer).unwrap();
             // Clear IRQ
             unwrap!(self.radio.clear_irq_status(Irq::RxDone.mask()));            
         } else if irq_status & Irq::Timeout.mask() != 0 {
             defmt::warn!("Timeout {}", self.radio.op_error());
             unwrap!(self.radio.clear_irq_status(Irq::Timeout.mask()));
+
+            // Flag failure
+            self.current_state = RadioState::Failure;
         } else if irq_status & Irq::Err.mask() != 0 {
             defmt::warn!("Packet error {}", self.radio.op_error());
             unwrap!(self.radio.clear_irq_status(Irq::Err.mask()));
@@ -263,7 +297,7 @@ impl RadioControl {
     // Private functions
     //----------------------------------------------------------- 
 
-    fn do_transmit(&mut self, data: &[u8], len: u8) -> Result<(), &str>{
+    fn do_transmit(&mut self, data: &[u8], len: u8) -> Result<(), &str> {
         // Take radio out of RX
         unwrap!(self.radio.set_standby(StandbyClk::Hse));
 
@@ -276,12 +310,17 @@ impl RadioControl {
         unwrap!(self.radio.set_lora_packet_params(&self.config.pkt_params));
 
         // Start TX
-        unwrap!(self.radio.set_tx(Timeout::DISABLED));
+        unwrap!(self.radio.set_tx(Timeout::from_duration_sat(Duration::from_secs(15))));
+
+        // Set internal state
+        self.current_state = RadioState::Transmitting;
 
         Ok(())
     }
 
     fn do_receive(&mut self) {
+        // Set rf switch
+        self.configure_rf_switch(RfSwitchType::RfSwitchRx);
         // Set for full length read
         self.config.pkt_params = self.config.pkt_params.set_payload_len(255);
         unwrap!(self.radio.set_lora_packet_params(&self.config.pkt_params));
