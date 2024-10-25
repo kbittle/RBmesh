@@ -21,7 +21,6 @@ use stm32wlxx_hal::{
     rtc::{Clk, Rtc},
     subghz::{SubGhz},
     uart::{self, Uart1},
-    util::new_delay,
 };
 use rtic::app;
 use rtic_monotonics::systick::prelude::*;
@@ -36,7 +35,7 @@ mod bm_at_cmd_handler;
 use bm_at_cmd_handler::{
     at_cmd::{
         self,
-        AtCommandSet,
+        AtCommand,
         AtCmdStr,
         MessageTuple,
     },
@@ -54,6 +53,7 @@ systick_monotonic!(Mono, 1000);
 mod app {
     use core::{borrow::BorrowMut, clone, fmt::Debug, ops::Deref};
 
+    use at_cmd::AtCommand;
     use bm_radio_control::bm_radio_control::RadioState;
 
     use super::*;
@@ -75,7 +75,7 @@ mod app {
         state: bool,
 
         // At Cmd task
-        received_cmd: Option<(AtCommandSet,bool)>,
+        received_cmd: Option<(AtCommand,bool)>,
         resp_value: AtCmdStr,
 
         // Radio task
@@ -161,7 +161,6 @@ mod app {
        
         // Setup AT command handler
         let mut at_cmd_resp_inst = AtCmdResp::new();
-        at_cmd_resp_inst.load_at_commands();
         defmt::info!("AT Command Init Complete");
 
         // Setup mesh stack
@@ -384,11 +383,17 @@ mod app {
 
                         // Current mechanism to print help
                         if print_help {
-                            defmt::info!("handle_command: print_help"); 
-
-                            if rx_cmd_enum == AtCommandSet::CmdAt {
+                            defmt::info!("handle_command: print_help");
+                            write_slice_uart1(uart1, at_cmd_resp_inst.prepare_help_str(rx_cmd_enum));
+                            return
+                        }
+                    
+                        // Handle parsed AT commands
+                        match rx_cmd_enum {                            
+                            AtCommand::AtList => {
                                 // Get list of commands from at_command_handler
-                                let cmd_list = at_cmd_resp_inst.get_available_cmds();
+                                let mut cmd_list: AtCmdStr = AtCmdStr::new();
+                                AtCommand::get_available_cmds(&mut cmd_list);
                                 write_slice_uart1(uart1, 
                                     at_cmd_resp_inst.prepare_response(
                                         rx_cmd_enum, 
@@ -396,26 +401,7 @@ mod app {
                                     )
                                 );
                             }
-                            else {
-                                write_slice_uart1(uart1, at_cmd_resp_inst.prepare_help_str(rx_cmd_enum));
-                            }
-                            
-                            return
-                        }
-                    
-                        // Handle parsed AT commands
-                        match rx_cmd_enum {
-                            AtCommandSet::CmdNewLine => {                                
-                                // Send character: >
-                                write_str_uart1(uart1, "\n\r>");
-                            }
-                            AtCommandSet::CmdAt => {                            
-                                // Send generic AT response
-                                write_slice_uart1(uart1, 
-                                    at_cmd_resp_inst.prepare_response(rx_cmd_enum, "")
-                                );                       
-                            }
-                            AtCommandSet::CmdAtCsq => {
+                            AtCommand::AtCsq => {
                                 (
                                     &mut ctx.shared.radio_inst
                                 ).lock(|radio_inst| {
@@ -429,7 +415,16 @@ mod app {
                                     );
                                 });                            
                             }
-                            AtCommandSet::CmdAtId => {
+                            AtCommand::AtGmr => {
+                                // Send ID response
+                                write_slice_uart1(uart1, 
+                                    at_cmd_resp_inst.prepare_response(
+                                        rx_cmd_enum, 
+                                        "1.0.0.0",
+                                    )
+                                );
+                            }
+                            AtCommand::AtId => {
                                 (
                                     &mut ctx.shared.mesh_inst
                                 ).lock(|mesh_inst| {
@@ -445,7 +440,7 @@ mod app {
                                     );
                                 });                            
                             }
-                            AtCommandSet::CmdAtMsg => {
+                            AtCommand::AtMsg => {
                                 // Parse argument String buffer into tuple
                                 let msg_cmd: Option<MessageTuple> = at_cmd::cmd_arg_into_msg(at_cmd_resp_inst.get_cmd_arg());
 
@@ -467,7 +462,7 @@ mod app {
                                     defmt::error!("Invalid command format");
                                 }                           
                             }
-                            AtCommandSet::CmdTestMessage => {
+                            AtCommand::TestMessage => {
                                 (
                                     &mut ctx.shared.radio_inst
                                 ).lock(|radio_inst| {
@@ -481,7 +476,7 @@ mod app {
                                     );
                                 });                            
                             }
-                            AtCommandSet::CmdRadioStatus => {
+                            AtCommand::RadioStatus => {
                                 (
                                     &mut ctx.shared.radio_inst
                                 ).lock(|radio_inst| {
@@ -494,7 +489,17 @@ mod app {
                                     );
                                 });
                             }
-                            AtCommandSet::CmdUnknown => {
+                            AtCommand::At => {                            
+                                // Send generic AT response
+                                write_slice_uart1(uart1, 
+                                    at_cmd_resp_inst.prepare_response(rx_cmd_enum, "")
+                                );                       
+                            }
+                            AtCommand::NewLine => {                                
+                                // Send character: >
+                                write_str_uart1(uart1, "\n\r>");
+                            }
+                            AtCommand::Unknown => {
                                 // Dont do anything for unknowns
                             }
                             _ => {

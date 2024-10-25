@@ -1,17 +1,10 @@
 use heapless::{self, Vec, String}; // fixed capacity `std::Vec`
 use defmt::unwrap;
 
-use crate::bm_network::NetworkId; // global logger
 use crate::bm_at_cmd_handler::at_cmd::{
     AtCmdStr,
-    AtCmd,
-    AtCommandSet,
+    AtCommand,
 };
-
-// Configurable hard coded max at command length
-const MAX_AT_CMDS: usize = 25;
-
-pub type AtCmdList = Vec<AtCmd, MAX_AT_CMDS>;
 
 #[derive(Clone, PartialEq)]
 pub struct AtCmdResp {
@@ -19,8 +12,6 @@ pub struct AtCmdResp {
     cmd_buffer: AtCmdStr,
     // Buffer for at command responses
     resp_buffer: AtCmdStr,
-    // List of registered at commands
-    supported_at_cmd: AtCmdList,
     // Buffer to store command arguments
     argument_buffer: AtCmdStr,
 }
@@ -31,35 +22,22 @@ impl AtCmdResp {
         AtCmdResp {
             cmd_buffer: AtCmdStr::new(),
             resp_buffer: AtCmdStr::new(),
-            supported_at_cmd: AtCmdList::new(),
             argument_buffer: AtCmdStr::new(),
-        }
-        
+        }        
     } 
-
-    pub fn load_at_commands(&mut self) {
-        self.add_at_cmd(AtCommandSet::CmdAt, "", false, "", "");
-        self.add_at_cmd(AtCommandSet::CmdAtCsq, "+CSQ", false, "+CSQ:", "Command to get instantaneous RSSI.");
-        self.add_at_cmd(AtCommandSet::CmdAtGmr, "+GMR", false, "Version:", "");
-        self.add_at_cmd(AtCommandSet::CmdAtId, "+ID", false, "+ID:", "Enter Network ID as a 32bit value.");
-        self.add_at_cmd(AtCommandSet::CmdAtMsg, "+MSG", true, "", "Format: <dest id>,<ack required>,<ttl>,<payload>");
-        self.add_at_cmd(AtCommandSet::CmdTestMessage, "+TMSG", false, "+", "Command to send \"Hello World\".");
-        self.add_at_cmd(AtCommandSet::CmdRoutingTable, "+RTABLE", false, "", "");
-        self.add_at_cmd(AtCommandSet::CmdRadioStatus, "+ST", false, "+", "Command to get radio status.");
-    }
 
     // Function to process 1 char at a time. Add them to internal buffers and decode AT commands.
     //
     // Returns tuple of: (decoded at command enum, t/f print help)
-    pub fn handle_rx_char(&mut self, in_char: u8) -> Option<(AtCommandSet,bool)> {
-        let mut command_accepted = AtCommandSet::CmdUnknown;
+    pub fn handle_rx_char(&mut self, in_char: u8) -> Option<(AtCommand,bool)> {
+        let mut command_accepted = AtCommand::Unknown;
         let mut print_help = false;
         
         // If enter character is received, handle command
         if in_char == b'\r' {
             if self.cmd_buffer.len() == 0 {
                 defmt::info!("new line");
-                return Some((AtCommandSet::CmdNewLine, false));
+                return Some((AtCommand::NewLine, false));
             }
             else if self.cmd_buffer.len() < 2 {
                 defmt::info!("Command too short");
@@ -87,42 +65,44 @@ impl AtCmdResp {
                 return None;
             }
             
-            // Handle command
-            let (at_str, cmd_str) = command_str.split_at(2);
-            for supp_cmd in &self.supported_at_cmd {
-                if supp_cmd.allows_write {
-                    // Create a copy of str to memcmp
-                    let mut str_to_match = supp_cmd.command_str.clone();
-                    unwrap!(str_to_match.push('='));
-                    // Check for cmd + '='
-                    if cmd_str.contains(str_to_match.trim()) {
+            // Handle Help Commands
+            if command_str.contains("?") {
+                // AT? is special case
+                if command_str == "AT?" {
+                    command_accepted = AtCommand::AtList;
+                }
+                else {
+                    let truncated_str = &command_str[0..command_str.len() - 1];
+                    if let Some(found_cmd) = AtCommand::match_command(truncated_str) {
+                        defmt::info!("Command accepted: str={}, enum={}", command_str, found_cmd);
+                        // Return matched help command
+                        print_help = true;
+                        command_accepted = found_cmd;
+                    }
+                }                
+            }
+            // Handle write commands
+            else if command_str.contains("=") {
+                let split_str: Vec<&str, 2> = command_str.split("=").collect();
+                if let Some(found_cmd) = AtCommand::match_command(split_str[0]) {
+                    if AtCommand::allow_write(found_cmd) {
                         // Grab str after command
-                        let arg: Vec<&str, 2> = cmd_str.split(str_to_match.trim()).collect();
-                        if arg.len() > 1 {
-                            defmt::info!("arguments: {}", arg[1]);
+                        if split_str.len() > 1 {
+                            defmt::info!("arguments: {}", split_str[1]);
                             // Store arguments
                             self.argument_buffer.clear();
-                            unwrap!(self.argument_buffer.push_str(arg[1]));
+                            unwrap!(self.argument_buffer.push_str(split_str[1]));
                             
-                            command_accepted = supp_cmd.command_enum;
-                        }
-                    }                                                             
+                            command_accepted = found_cmd;
+                        }                        
+                    }
                 }
-                
-                // Check for cmd + ?. I.E. AT+CSQ as AT+CSQ?
-                let mut str_to_match = supp_cmd.command_str.clone();
-                str_to_match.push('?').unwrap();
-                if cmd_str == str_to_match {
-                    defmt::info!("Command help: {}", cmd_str);
-                    // Return Help as we dont want to print normal response
-                    print_help = true;
-                    command_accepted = supp_cmd.command_enum;
-                }                
-                else if cmd_str == supp_cmd.command_str.trim() {
-                    defmt::info!("Command accepted: {}", cmd_str);
-                    // Return matched command
-                    command_accepted = supp_cmd.command_enum;
-                }
+            }
+            // Handle normal command
+            else if let Some(found_cmd) = AtCommand::match_command(command_str) {
+                defmt::info!("Command accepted: str={}, enum={}", command_str, found_cmd);
+                // Return matched command
+                command_accepted = found_cmd;                
             }
 
             // Clear command buffer
@@ -138,7 +118,7 @@ impl AtCmdResp {
         None
     }
 
-    pub fn prepare_response(&mut self, resp_enum: AtCommandSet, resp_val: &str) -> &[u8] {
+    pub fn prepare_response(&mut self, resp_enum: AtCommand, resp_val: &str) -> &[u8] {
         // Clear the buffer before loading new response
         self.resp_buffer.clear();
 
@@ -146,16 +126,14 @@ impl AtCmdResp {
         unwrap!(self.resp_buffer.push_str("\n\r"));
 
         // Add pre canned response str
-        for supp_cmd in self.supported_at_cmd.iter_mut() {
-            if supp_cmd.command_enum == resp_enum {
-                // Stupid String library has a runtime error at pushing a str len of 1
-                if supp_cmd.response_str.len() == 1 {
-                    let ch = supp_cmd.response_str.chars().next().unwrap();
-                    unwrap!(self.resp_buffer.push(ch));
-                }
-                if supp_cmd.response_str.len() > 2 {
-                    unwrap!(self.resp_buffer.push_str(supp_cmd.response_str.as_str()));
-                }                
+        if let Some(resp) = AtCommand::get_response(resp_enum) {
+            // Stupid String library has a runtime error at pushing a str len of 1
+            if resp.len() == 1 {
+                let ch = resp.chars().next().unwrap();
+                unwrap!(self.resp_buffer.push(ch));
+            }
+            else if resp.len() > 2 {
+                unwrap!(self.resp_buffer.push_str(resp));
             }
         }
         
@@ -169,7 +147,7 @@ impl AtCmdResp {
         self.resp_buffer.as_bytes()
     }
 
-    pub fn prepare_help_str(&mut self, resp_enum: AtCommandSet) -> &[u8] {
+    pub fn prepare_help_str(&mut self, resp_enum: AtCommand) -> &[u8] {
         // Clear the buffer before loading new response
         self.resp_buffer.clear();
 
@@ -177,11 +155,9 @@ impl AtCmdResp {
         unwrap!(self.resp_buffer.push_str("\n\r"));
 
         // Add pre canned help str
-        for supp_cmd in self.supported_at_cmd.iter_mut() {
-            if supp_cmd.command_enum == resp_enum {
-                if supp_cmd.help_str.len() > 2 {
-                    unwrap!(self.resp_buffer.push_str(supp_cmd.help_str.as_str()));
-                }
+        if let Some(resp) = AtCommand::get_help(resp_enum) {
+            if resp.len() > 2 {
+                unwrap!(self.resp_buffer.push_str(resp));
             }
         }
 
@@ -189,21 +165,6 @@ impl AtCmdResp {
         
         self.resp_buffer.as_bytes()
     }
-
-    // Returns a string of all available commands in the local list
-    pub fn get_available_cmds(&mut self) -> AtCmdStr {
-        let mut str_out = AtCmdStr::new();
-
-        unwrap!(str_out.push_str("Available Commands:"));
-
-        // Append all supported commands
-        for supp_cmd in self.supported_at_cmd.iter_mut() {
-            unwrap!(str_out.push_str("\n\rAT"));
-            unwrap!(str_out.push_str(supp_cmd.command_str.as_str()));
-        }
-
-        str_out.clone()
-    }    
 
     pub fn get_cmd_arg(&mut self) -> AtCmdStr {
         self.argument_buffer.clone()
@@ -219,25 +180,6 @@ impl AtCmdResp {
 
     //-----------------------------------------------------------
     // Private functions
-    //-----------------------------------------------------------
-
-    fn add_at_cmd(&mut self, command_enum: AtCommandSet, command_str: &str, allow_write: bool, response_str: &str, help_str: &str) {
-        // Create a new AtCmd instance
-        let new_cmd = AtCmd::new(
-            command_enum,
-            String::try_from(command_str).unwrap(),  // Convert str to AtCmdStr
-            allow_write,
-            String::try_from(response_str).unwrap(),  // Convert str to AtCmdStr
-            String::try_from(help_str).unwrap(),
-        );
-
-        // Add the new command to the supported commands list
-        if self.supported_at_cmd.len() < MAX_AT_CMDS {
-            self.supported_at_cmd.push(new_cmd).unwrap();
-        } else {
-            // Handle the case where the command list is full, if necessary
-            defmt::error!("Warning: Maximum number of AT commands reached. Cannot add '{}'", command_str);
-        }
-    }  
+    //-----------------------------------------------------------    
 
 }

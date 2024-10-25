@@ -12,7 +12,7 @@ pub struct BmNetworkStack {
     network_id: NetworkId,
 
     // Node list / routing table
-    nodes: Vec<BmNodeEntry, BM_MAX_NET_DEVICES>,
+    nodes: Vec<BmNodeEntry, BM_MAX_NET_DEVICES>, // TODO - NodeEntry is ~160bytes, so 16Kb stack consumed
 }
 
 impl BmNetworkStack {
