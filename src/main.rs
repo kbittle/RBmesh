@@ -54,6 +54,7 @@ mod app {
     use core::{borrow::BorrowMut, clone, fmt::Debug, ops::Deref};
 
     use at_cmd::AtCommand;
+    use bm_network::bm_network_node::bm_network_node::BmNodeEntry;
     use bm_radio_control::bm_radio_control::RadioState;
 
     use super::*;
@@ -160,11 +161,13 @@ mod app {
         defmt::info!("Radio Init Complete");
        
         // Setup AT command handler
-        let mut at_cmd_resp_inst = AtCmdResp::new();
+        let at_cmd_resp_inst = AtCmdResp::new();
         defmt::info!("AT Command Init Complete");
 
+        // Grab device number. Unique for each individual device.
+        let devnum: u32 = info::Uid64::from_device().devnum();
         // Setup mesh stack
-        let mesh_inst = BmNetworkEngine::new(Some(5)); // todo - pass in chip id
+        let mesh_inst = BmNetworkEngine::new(Some(devnum));
         defmt::info!("Mesh Stack Init Complete");
 
         // Start software tasks
@@ -389,17 +392,12 @@ mod app {
                         }
                     
                         // Handle parsed AT commands
-                        match rx_cmd_enum {                            
-                            AtCommand::AtList => {
-                                // Get list of commands from at_command_handler
-                                let mut cmd_list: AtCmdStr = AtCmdStr::new();
-                                AtCommand::get_available_cmds(&mut cmd_list);
+                        match rx_cmd_enum {                                   
+                            AtCommand::At => {
+                                // Send generic AT response
                                 write_slice_uart1(uart1, 
-                                    at_cmd_resp_inst.prepare_response(
-                                        rx_cmd_enum, 
-                                        cmd_list.trim()
-                                    )
-                                );
+                                    at_cmd_resp_inst.prepare_response(rx_cmd_enum, "")
+                                );                       
                             }
                             AtCommand::AtCsq => {
                                 (
@@ -440,7 +438,7 @@ mod app {
                                     );
                                 });                            
                             }
-                            AtCommand::AtMsg => {
+                            AtCommand::AtMsgSend => {
                                 // Parse argument String buffer into tuple
                                 let msg_cmd: Option<MessageTuple> = at_cmd::cmd_arg_into_msg(at_cmd_resp_inst.get_cmd_arg());
 
@@ -476,11 +474,34 @@ mod app {
                                     );
                                 });                            
                             }
+                            AtCommand::RoutingTable => {
+                                (
+                                    &mut ctx.shared.mesh_inst,
+                                ).lock(|mesh_inst| {
+                                    // Prints out 1 line per node in table.
+                                    // Note: May need to refactor this when we support more nodes.
+                                    let num_nodes = mesh_inst.stack.get_num_nodes();
+                                    if num_nodes > 0 {
+                                        let mut output_str: String<100> = String::new();
+                                        for node_idx in 0..num_nodes {
+                                            if let Some(node_data) = mesh_inst.stack.get_node_by_idx(node_idx) {
+                                                // Write struct to String. Formatter is implemented in node file
+                                                write!(&mut output_str, "\n\r{}", node_data).unwrap();
+                                                write_str_uart1(uart1, output_str.as_str());
+                                            }
+                                        }
+                                    }
+                                    else {
+                                        write_str_uart1(uart1, "\n\r0 Nodes");
+                                    }
+                                    write_str_uart1(uart1, "\n\rOk\n\r>");
+                                });
+                            }
                             AtCommand::RadioStatus => {
                                 (
                                     &mut ctx.shared.radio_inst
                                 ).lock(|radio_inst| {
-                                    // Send AT response
+                                    // Print radio status response
                                     write_slice_uart1(uart1, 
                                         at_cmd_resp_inst.prepare_response(
                                             rx_cmd_enum, 
@@ -488,14 +509,19 @@ mod app {
                                         )
                                     );
                                 });
-                            }
-                            AtCommand::At => {                            
-                                // Send generic AT response
+                            }                
+                            AtCommand::AtList => {
+                                // Get list of commands from at_command_handler
+                                let mut cmd_list: AtCmdStr = AtCmdStr::new();
+                                AtCommand::get_available_cmds(&mut cmd_list);
                                 write_slice_uart1(uart1, 
-                                    at_cmd_resp_inst.prepare_response(rx_cmd_enum, "")
-                                );                       
+                                    at_cmd_resp_inst.prepare_response(
+                                        rx_cmd_enum, 
+                                        cmd_list.trim()
+                                    )
+                                );
                             }
-                            AtCommand::NewLine => {                                
+                            AtCommand::NewLine => {
                                 // Send character: >
                                 write_str_uart1(uart1, "\n\r>");
                             }

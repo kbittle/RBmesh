@@ -76,48 +76,111 @@ impl BmNetworkEngine {
             return None
         }
 
+        // Update routing table. Even if the packet is direct and not relayed. We want 
+        // the neighbor node to show up as a route with distance 0.
+        self.stack.update_node_route(
+            new_packet.get_originator(), 
+            new_packet.get_source(),
+            new_packet.get_distance(), 
+            millis, rssi);
+        
+        // Check hop count against TTL of packet
+        // TODO: move this logic into just the packet relay sections?
+        //       i.e. if we are the destination at 3 of 3 hops, we should accept
+        if new_packet.get_info().hop_count() >= new_packet.get_info().ttl() {
+            defmt::warn!("rb_engine: TTL expired, kill packet");
+            return None
+        }
+
         // Handle packet based off type
         match new_packet.packet_type {
             BmPacketTypes::RouteDiscoveryRequest => {
-                // now what?
-
                 // If dest is us, reply with response.
+                if new_packet.get_destination() == self.stack.get_local_network_id() {
+                    defmt::info!("rb_engine: Rx Disc Req to us, Tx Disc Resp");
 
-                // Else update hop count and add packet to outbound
+                    // Queue up discovery response. Addressed to the originator 
+                    // through the node we received this from. Same TTL and info bits.
+                    self.outbound.push(
+                        BmNetworkPacket::new_with_payload(
+                            BmPacketTypes::RouteDiscoveryResponse, 
+                            self.stack.get_local_network_id(), 
+                            new_packet.get_originator(),
+                            None
+                        )
+                        .with_next_hop(new_packet.get_source())
+                        .with_ttl(new_packet.get_info().ttl())
+                        .with_ack(new_packet.get_info().required_ack())
+                        .is_ok_to_transmit(),
+                    ).unwrap();
+                } // Else update hop count and add packet to outbound
+                else {
+                    defmt::info!("rb_engine: Rx Disc Req, relay");
+
+                    // Update source with our network id
+                    new_packet.set_source(self.stack.get_local_network_id());
+                    // Increment hop count
+                    new_packet.increment_hop_count();
+                    // Set Ok to transmit
+                    new_packet.ok_to_transmit = true;
+                    // Push updated packet to outbound queue
+                    self.outbound.push(new_packet.clone()).unwrap();
+                }
             }
             BmPacketTypes::RouteDiscoveryResponse => {
-                // If dest is us, update table?
+                // If dest is us, update node table
                 if new_packet.get_destination() == self.stack.get_local_network_id() {
+                    defmt::info!("rb_engine: Rx Disc Resp to us, update routing table");
                     self.stack.add_node(
                         BmNodeEntry::new(new_packet.get_originator())
+                        .with_metrics(millis)
                         .with_route(
                             new_packet.get_source(), 
                             new_packet.get_distance(), 
                             millis, rssi
                         ),
                     );
+
+                    // TODO Look in outbound queue for packets to update next hop
+
+                } // Else update hop count and add packet to outbound
+                else {
+                    defmt::info!("rb_engine: Rx Disc Resp, relay");
+
+                    // Update source with our network id
+                    new_packet.set_source(self.stack.get_local_network_id());
+                    // Increment hop count
+                    new_packet.increment_hop_count();
+                    // Check if we have route to destination
+                    if let Some(next_hop) = self.stack.get_next_hop(new_packet.get_destination()) {
+                        // Update next_hop from routing table
+                        new_packet.set_next_hop(Some(next_hop));
+                        // Set Ok to transmit
+                        new_packet.ok_to_transmit = true;
+                        // Push updated packet to outbound queue
+                        self.outbound.push(new_packet.clone()).unwrap();
+                    }
+                    // Else generate discovery error??
                 }
-
-                // Else update hop count and add packet to outbound
             }
-            _ => { }
-        }
+            BmPacketTypes::RouteDiscoveryError => {
+                defmt::info!("rb_engine: Rx Disc Error");
 
-        // Check if sending node is in our node table
-        let node_entry = self.stack.find_node_by_id(new_packet.get_source());
-        if node_entry.is_some() {
-            // update metrics
-            node_entry.unwrap().update_route(
-                new_packet.get_source(), 
-                new_packet.get_distance(), 
-                millis, rssi
-            );
-        }
-        else {
-            // add node to table
-        }
-
-        // Look up route, modify packet, and queue up outbound
+                // Not sure if I need this??
+            }
+            BmPacketTypes::DataPayload => {
+                defmt::info!("rb_engine: Rx Data payload");
+            }
+            BmPacketTypes::DataPayloadAck => {
+                defmt::info!("rb_engine: Rx Data payload ack");
+            }
+            BmPacketTypes::BcastNeighborTable => {
+                defmt::info!("rb_engine: Rx Neighbor table");
+            }
+            _ => {
+                defmt::info!("rb_engine: Unknown packet type");
+            }
+        }        
 
         Some(new_packet)
     }
@@ -149,8 +212,7 @@ impl BmNetworkEngine {
 
     pub fn initiate_packet_transfer(&mut self, dest: NetworkId, ack: bool, ttl: u8, payload: BmNetworkPacketPayload) {
         // Check stack if we have route
-        let node = self.stack.find_node_by_id(dest);
-        if node.is_none() {
+        if self.stack.find_node_by_id(dest).is_none() {
             // Start network discovery for destination node
             self.outbound.push(
                 BmNetworkPacket::new(

@@ -8,6 +8,9 @@ use crate::bm_network::{
 // Buffer size of hdr + payload
 pub type BmNetworkPacketPayload = Vec<u8, BM_MAX_OTA_SIZE>;
 
+// Max TTL and hop count value
+const MAX_TTL_HOP_CNT: u8 = 7;
+
 #[repr(u8)]
 #[derive(Default, Clone, Debug, PartialEq)]
 pub enum BmPacketTypes {
@@ -112,7 +115,7 @@ impl BmNetworkRoutingHdr {
     pub const fn with_encrypted(self, new_with_encrypted: bool) -> Self {
         self.info.with_encrypted(new_with_encrypted);
         self
-    }
+    }    
 }
 
 #[derive(Default, Debug, Clone, PartialEq)]
@@ -161,6 +164,11 @@ impl BmNetworkPacket {
         }
     }
 
+    pub const fn with_next_hop(mut self, new_next_hop: NetworkId) -> Self {
+        self.routing_hdr = self.routing_hdr.with_next_hop(new_next_hop);
+        self
+    }
+
     pub const fn with_ttl(mut self, new_ttl: u8) -> Self {
         self.routing_hdr = self.routing_hdr.with_ttl(new_ttl);
         self
@@ -180,8 +188,14 @@ impl BmNetworkPacket {
     pub fn get_source(&mut self) -> NetworkId {
         self.routing_hdr.src
     }
+    pub fn set_source(&mut self, new_src: NetworkId) {
+        self.routing_hdr.src = new_src;
+    }
     pub fn get_next_hop(&mut self) -> NetworkId {
         self.routing_hdr.next_hop
+    }
+    pub fn set_next_hop(&mut self, new_next_hop: NetworkId) {
+        self.routing_hdr.next_hop = new_next_hop;
     }
     pub fn get_originator(&mut self) -> NetworkId {
         self.routing_hdr.orig
@@ -191,6 +205,17 @@ impl BmNetworkPacket {
     }
     pub fn get_distance(&mut self) -> u8 {
         self.routing_hdr.info.hop_count()
+    }
+    pub fn get_info(&mut self) -> BmNetworkHdrInfo {
+        self.routing_hdr.info
+    }
+    pub fn increment_hop_count(&mut self) {
+        let hop_cnt = self.routing_hdr.info.hop_count();
+
+        if hop_cnt + 1 <= MAX_TTL_HOP_CNT {
+            self.routing_hdr.info.set_hop_count(hop_cnt + 1);
+        }
+        
     }
 
     // Mutation functions
