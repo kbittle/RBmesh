@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  cross_compile:
 
     runs-on: ubuntu-latest
 
@@ -18,7 +18,12 @@ jobs:
     - uses: actions/checkout@v4
     - name: Build
       run: |
-       echo "Remove MSVC toolchain file."
+       rustup
+       echo "Adding target compiler..."
+       rustup target add thumbv7m-none-eabi
+       echo "Setting default target..."
+       rustup default thumbv7m-none-eabi
+       echo "Removing MSVC toolchain file..."
        rm rust-toolchain.toml
        cargo build --release
     - name: Run tests
