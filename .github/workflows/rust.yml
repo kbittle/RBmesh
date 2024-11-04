@@ -18,12 +18,12 @@ jobs:
     - uses: actions/checkout@v4
     - name: Build
       run: |
+       echo "Removing MSVC toolchain file..."
+       rm rust-toolchain.toml
        echo "Adding target compiler..."
        rustup target add thumbv7m-none-eabi
        echo "Setting default target..."
        rustup default thumbv7m-none-eabi
-       echo "Removing MSVC toolchain file..."
-       rm rust-toolchain.toml
        cargo build --release
     - name: Run tests
       run: cargo test --verbose
