@@ -1,3 +1,5 @@
+use core::ops::Index;
+
 use heapless::Vec; // fixed capacity `std::Vec`
 use super::{
     bm_network_node::bm_network_node::BmNodeEntry, 
@@ -17,7 +19,7 @@ use defmt::{write, unwrap};
 #[derive(Debug, Default, Clone, PartialEq)]
 pub enum BmEngineStatus {
     #[default]
-    Start,
+    Idle,
     PerformingNetworkDiscovery,
     RouteFound,
     SendingPayload,
@@ -32,7 +34,7 @@ pub enum BmEngineStatus {
 impl defmt::Format for BmEngineStatus {
     fn format(&self, fmt: defmt::Formatter) {
         match self {
-            BmEngineStatus::Start => write!(fmt, "Start"),
+            BmEngineStatus::Idle => write!(fmt, "Idle"),
             BmEngineStatus::PerformingNetworkDiscovery => write!(fmt, "PerformingNetworkDiscovery"),
             BmEngineStatus::RouteFound => write!(fmt, "RouteFound"),
             BmEngineStatus::SendingPayload => write!(fmt, "SendingPayload"),
@@ -53,6 +55,9 @@ pub struct BmNetworkEngine {
     // Out packet buffer
     outbound: Vec<BmNetworkPacket, BM_OUTBOUND_QUEUE_SIZE>,
 
+    // Index of packet we are currently handling in the engine state machine
+    working_outbound_index: Option<usize>,
+
     // Enum state machine for status of mesh engine
     engine_status: BmEngineStatus,
 }
@@ -62,6 +67,7 @@ impl BmNetworkEngine {
         BmNetworkEngine {
             stack: BmNetworkStack::new(local_network_id),
             outbound: Vec::new(),
+            working_outbound_index: None,
             engine_status: BmEngineStatus::default(),
         }
     }
@@ -70,6 +76,8 @@ impl BmNetworkEngine {
         // Parse packet into struct
         // If we cannot successfully parse packet, return
         let mut new_packet = BmNetworkPacket::from(length, buffer)?;
+
+        defmt::info!("process_packet len={}", length);
 
         // Do not process our own packets
         if new_packet.get_originator() == self.stack.get_local_network_id() {
@@ -81,7 +89,7 @@ impl BmNetworkEngine {
         self.stack.update_node_route(
             new_packet.get_originator(), 
             new_packet.get_source(),
-            new_packet.get_distance(), 
+            new_packet.get_hop_count(),
             millis, rssi);
         
         // Check hop count against TTL of packet
@@ -92,95 +100,89 @@ impl BmNetworkEngine {
             return None
         }
 
-        // Handle packet based off type
-        match new_packet.packet_type {
-            BmPacketTypes::RouteDiscoveryRequest => {
-                // If dest is us, reply with response.
-                if new_packet.get_destination() == self.stack.get_local_network_id() {
+        // If dest is us, handle packet based off type
+        if new_packet.get_destination() == self.stack.get_local_network_id() {
+            match new_packet.packet_type {
+                BmPacketTypes::RouteDiscoveryRequest => {
                     defmt::info!("rb_engine: Rx Disc Req to us, Tx Disc Resp");
 
+                    // TODO - add queue length check for push
+    
                     // Queue up discovery response. Addressed to the originator 
                     // through the node we received this from. Same TTL and info bits.
                     self.outbound.push(
-                        BmNetworkPacket::new_with_payload(
+                        BmNetworkPacket::new(
                             BmPacketTypes::RouteDiscoveryResponse, 
-                            self.stack.get_local_network_id(), 
+                            self.stack.get_local_network_id(),
+                            new_packet.get_source(),
                             new_packet.get_originator(),
+                            new_packet.get_info().ttl(),
+                            new_packet.get_info().required_ack(),
                             None
                         )
-                        .with_next_hop(new_packet.get_source())
-                        .with_ttl(new_packet.get_info().ttl())
-                        .with_ack(new_packet.get_info().required_ack())
                         .is_ok_to_transmit(),
                     ).unwrap();
-                } // Else update hop count and add packet to outbound
-                else {
-                    defmt::info!("rb_engine: Rx Disc Req, relay");
-
-                    // Update source with our network id
-                    new_packet.set_source(self.stack.get_local_network_id());
-                    // Increment hop count
-                    new_packet.increment_hop_count();
-                    // Set Ok to transmit
-                    new_packet.ok_to_transmit = true;
-                    // Push updated packet to outbound queue
-                    self.outbound.push(new_packet.clone()).unwrap();
                 }
-            }
-            BmPacketTypes::RouteDiscoveryResponse => {
-                // If dest is us, update node table
-                if new_packet.get_destination() == self.stack.get_local_network_id() {
-                    defmt::info!("rb_engine: Rx Disc Resp to us, update routing table");
-                    self.stack.add_node(
-                        BmNodeEntry::new(new_packet.get_originator())
-                        .with_metrics(millis)
-                        .with_route(
-                            new_packet.get_source(), 
-                            new_packet.get_distance(), 
-                            millis, rssi
-                        ),
-                    );
-
-                    // TODO Look in outbound queue for packets to update next hop
-
-                } // Else update hop count and add packet to outbound
-                else {
-                    defmt::info!("rb_engine: Rx Disc Resp, relay");
-
-                    // Update source with our network id
-                    new_packet.set_source(self.stack.get_local_network_id());
-                    // Increment hop count
-                    new_packet.increment_hop_count();
-                    // Check if we have route to destination
-                    if let Some(next_hop) = self.stack.get_next_hop(new_packet.get_destination()) {
-                        // Update next_hop from routing table
-                        new_packet.set_next_hop(Some(next_hop));
-                        // Set Ok to transmit
-                        new_packet.ok_to_transmit = true;
-                        // Push updated packet to outbound queue
-                        self.outbound.push(new_packet.clone()).unwrap();
+                BmPacketTypes::RouteDiscoveryResponse => {    
+                    // Discovery Response addressed to us. Theoretically our route is found.
+                    if self.engine_status == BmEngineStatus::PerformingNetworkDiscovery {
+                        defmt::info!("rb_engine: Rx Disc Resp, route found");
+                        self.engine_status = BmEngineStatus::RouteFound;
                     }
-                    // Else generate discovery error??
+                    else {
+                        defmt::error!("rb_engine: Rx Disc Resp, unexpected");
+                    }
+                }
+                BmPacketTypes::RouteDiscoveryError => {
+                    defmt::info!("rb_engine: Rx Disc Error");
+    
+                    // What todo with disc error addressed to us??
+                }
+                BmPacketTypes::DataPayload => {
+                    defmt::info!("rb_engine: Rx DataPayload");
+
+                    // What to do with receieved data??
+
+                    // TODO - Send ACK response if required
+                }
+                BmPacketTypes::DataPayloadAck => {
+                    if self.engine_status == BmEngineStatus::WaitingForAck {
+                        defmt::info!("rb_engine: Rx DataPayloadAck");
+                        self.engine_status = BmEngineStatus::AckReceieved;
+                    }
+                    else {
+                        defmt::error!("rb_engine: Rx DataPayloadAck, unexpected");
+                    }
+                }
+                BmPacketTypes::BcastNeighborTable => {
+                    defmt::info!("rb_engine: Rx Neighbor table");
+                    // Should never receieve addressed neighbor table packet
+                }
+                _ => {
+                    defmt::info!("rb_engine: Unknown packet type");
                 }
             }
-            BmPacketTypes::RouteDiscoveryError => {
-                defmt::info!("rb_engine: Rx Disc Error");
+        }
+        else { // Route packet not addressed to us
+            match new_packet.packet_type {
+                BmPacketTypes::RouteDiscoveryRequest |
+                BmPacketTypes::BcastNeighborTable => {
+                    defmt::info!("rb_engine: rebroadcast packet");
 
-                // Not sure if I need this??
+                    self.broadcast_packet(new_packet.clone());
+                }
+                BmPacketTypes::RouteDiscoveryResponse |
+                BmPacketTypes::DataPayload |
+                BmPacketTypes::DataPayloadAck  => {
+                    defmt::info!("rb_engine: routing packet");
+    
+                    if !self.route_packet(new_packet.clone()) {
+                        // Generate discovery error??
+                    } 
+                }
+                _ => {}
             }
-            BmPacketTypes::DataPayload => {
-                defmt::info!("rb_engine: Rx Data payload");
-            }
-            BmPacketTypes::DataPayloadAck => {
-                defmt::info!("rb_engine: Rx Data payload ack");
-            }
-            BmPacketTypes::BcastNeighborTable => {
-                defmt::info!("rb_engine: Rx Neighbor table");
-            }
-            _ => {
-                defmt::info!("rb_engine: Unknown packet type");
-            }
-        }        
+        }
 
         Some(new_packet)
     }
@@ -201,7 +203,7 @@ impl BmNetworkEngine {
         for pkt in self.outbound.iter_mut() {
             if pkt.ok_to_transmit {
                 // Record timestamp of last tx
-                pkt.last_tx_timestamp = time_millis;
+                pkt.tx_complete_timestamp = Some(time_millis);
                 // Increment tx counter
                 pkt.tx_count += 1;
                 // Remove from list of available packets to tx
@@ -211,63 +213,135 @@ impl BmNetworkEngine {
     }
 
     pub fn initiate_packet_transfer(&mut self, dest: NetworkId, ack: bool, ttl: u8, payload: BmNetworkPacketPayload) {
-        // Check stack if we have route
-        if self.stack.find_node_by_id(dest).is_none() {
-            // Start network discovery for destination node
+        if self.engine_status == BmEngineStatus::Idle {
+            // TODO - add some checks for pushing to queue
+            // Queue up data payload to send
+            let mut pkt = BmNetworkPacket::new(
+                BmPacketTypes::DataPayload, 
+                self.stack.get_local_network_id(),
+                None,
+                dest,
+                ttl,
+                ack,
+                Some(payload)
+            );
+
+            defmt::info!("data pkt = {}", defmt::Display2Format(&pkt));  
             self.outbound.push(
-                BmNetworkPacket::new(
-                    BmPacketTypes::RouteDiscoveryRequest, 
-                    self.stack.get_local_network_id(), 
-                    dest
-                ).with_ttl(ttl)
-                .is_ok_to_transmit(),
+                pkt
             ).unwrap();
-            self.engine_status = BmEngineStatus::PerformingNetworkDiscovery;
+
+            // Check stack if we have route
+            if self.stack.find_node_by_id(dest).is_none() {
+                // Start network discovery for destination node
+                self.start_network_discovery(dest, ttl);
+            }
+            else {
+                // Set data packet as working packet
+                self.select_data_packet();
+                // Jump right into sending payload
+                self.engine_status = BmEngineStatus::SendingPayload;
+            }           
         }
         else {
-            // Jump right into sending payload
-            self.engine_status = BmEngineStatus::SendingPayload;
-        } 
-      
-        // Queue up data payload to send
-        self.outbound.push(
-            BmNetworkPacket::new_with_payload(
-                BmPacketTypes::DataPayload, 
-                self.stack.get_local_network_id(), 
-                dest,
-                Some(payload)
-            )
-            .with_ttl(ttl)
-            .with_ack(ack)
-        ).unwrap();
-              
+            defmt::warn!("initiate_packet_transfer: busy");
+        }              
     }
 
     pub fn run_engine(&mut self, current_time_millis: i64) -> BmEngineStatus {
         match self.engine_status {
             BmEngineStatus::PerformingNetworkDiscovery => {
-                // Add some sort of time check to retry
+                // TODO - Add some sort of time check to retry?
 
-                // if retry's go past x then change to no route 
-
-                if self.outbound[0].tx_count > 0 {
-                    if current_time_millis - self.outbound[0].last_tx_timestamp > 10000 {    
+                // Timeout on route discovery
+                // TODO - make timeout dynamic off the hop count and radio settings
+                // TODO - currently timeout includes tx time + rx time. Maybe change so timeout doesnt start until tx complete
+                if let Some(tx_comp_time) = self.outbound[self.working_outbound_index.unwrap()].tx_complete_timestamp {
+                    if current_time_millis - tx_comp_time > 10000 {    
                         defmt::info!("run_engine: PerformingNetworkDiscovery - timeout");
                         defmt::info!("current_time_millis={}", defmt::Display2Format(&current_time_millis));
-                        defmt::info!("last_tx_timestamp={}", defmt::Display2Format(&self.outbound[0].last_tx_timestamp));  
+                        defmt::info!("tx_complete_timestamp={}", defmt::Display2Format(&tx_comp_time));  
                         self.engine_status = BmEngineStatus::ErrorNoRoute;
                     }
-            }             
+                }                     
             }
             BmEngineStatus::RouteFound => {
-                defmt::info!("run_engine: RouteFound, sending payload");
-                self.engine_status = BmEngineStatus::SendingPayload;
+                // Remove node discovery packet from outbound
+                self.clear_working_packet();
 
-                // update outbound packet with new routing info
+                // Find data payload and set working buffer index
+                if self.select_data_packet() {
+                    defmt::info!("run_engine: RouteFound -> SendingPayload");
+
+                    // Transition to send payload
+                    self.engine_status = BmEngineStatus::SendingPayload;
+                }                
+                else {
+                    defmt::warn!("run_engine: RouteFound -> Complete, could not find data pkt");
+
+                    // Transition to complete
+                    self.engine_status = BmEngineStatus::Complete;
+                } 
+            }
+            BmEngineStatus::SendingPayload => {
+                self.send_data_payload();
+            }
+            BmEngineStatus::RetryingPayload => {
+                defmt::info!("run_engine: RetryingPayload -> SendingPayload");
+                
+                self.outbound[self.working_outbound_index.unwrap()].tx_count += 1;
+
+                // TODO - anything else to update?
+
+                // Transition to send payload which will search for the best route
+                self.engine_status = BmEngineStatus::SendingPayload;
+            }
+            BmEngineStatus::WaitingForAck => {
+                // Handle timeout on data payload
+                // TODO - currently timeout includes tx time + rx time. Maybe change so timeout doesnt start until tx complete
+                if let Some(tx_comp_time) = self.outbound[self.working_outbound_index.unwrap()].tx_complete_timestamp {
+                    if current_time_millis - tx_comp_time > 10000 {    
+                        defmt::info!("run_engine: WaitingForAck - timeout");
+                        defmt::info!("current_time_millis={}", defmt::Display2Format(&current_time_millis));
+                        defmt::info!("tx_complete_timestamp={}", defmt::Display2Format(&tx_comp_time));  
+    
+                        // Record error on that route
+                        self.stack.set_node_error(
+                            self.outbound[self.working_outbound_index.unwrap()].get_next_hop(), 
+                            current_time_millis);
+                        
+                        // Check if tx count is below threshold
+                        if self.outbound[self.working_outbound_index.unwrap()].tx_count < BM_PACKET_RETRY_COUNT {
+                            self.engine_status = BmEngineStatus::RetryingPayload;
+                        }
+                        else {
+                            self.engine_status = BmEngineStatus::ErrorNoAck;
+                        }
+                    }
+                }                
             }
             BmEngineStatus::ErrorNoRoute => {
-                defmt::info!("run_engine: ErrorNoRoute");
+                defmt::info!("run_engine: ErrorNoRoute -> Complete");
+
                 self.engine_status = BmEngineStatus::Complete;
+            }
+            BmEngineStatus::ErrorNoAck => {
+                defmt::info!("run_engine: ErrorNoAck -> Complete");
+
+                // TODO -  add support for retransmits. Need to record error on that route and re-evaluate if there is a better route.
+
+                self.engine_status = BmEngineStatus::Complete;
+
+            }
+            BmEngineStatus::Complete => {
+                // Wait for transmit to complete before erasing working packet
+                if self.outbound[self.working_outbound_index.unwrap()].ok_to_transmit == false {
+                    defmt::info!("run_engine: Complete");
+
+                    self.clear_working_packet();
+
+                    self.engine_status = BmEngineStatus::Idle;
+                }
             }
             _ => { }
         }
@@ -278,5 +352,111 @@ impl BmNetworkEngine {
     // Private functions
     //----------------------------------------------------------- 
 
+    fn start_network_discovery(&mut self, dest: NetworkId, ttl: u8) {
+        defmt::info!("start_network_discovery: id={}", dest);
+
+        self.outbound.push(
+            BmNetworkPacket::new(
+                BmPacketTypes::RouteDiscoveryRequest, 
+                self.stack.get_local_network_id(),
+                None,
+                dest,
+                ttl,
+                false,
+                None
+            ).is_ok_to_transmit(),
+        ).unwrap();
+
+        self.working_outbound_index = Some(self.outbound.len() - 1);
+        self.engine_status = BmEngineStatus::PerformingNetworkDiscovery;
+    }
+
+    fn clear_working_packet(&mut self) {
+        if let Some(index) = self.working_outbound_index {
+            // Remove working buffer
+            self.outbound.remove(index);
+            // Invalidate working buff index
+            self.working_outbound_index = None;
+        }
+        else {
+            defmt::error!("No working index");
+        }
+    }
+
+    fn broadcast_packet(&mut self, mut packet_to_broadcast: BmNetworkPacket) {
+        // Update source with our network id
+        packet_to_broadcast.set_source(self.stack.get_local_network_id());
+        // Increment hop count
+        packet_to_broadcast.increment_hop_count();
+        // Set Ok to transmit
+        packet_to_broadcast.ok_to_transmit = true;
+        // Push updated packet to outbound queue
+        self.outbound.push(packet_to_broadcast).unwrap();
+    }
+
+    fn route_packet(&mut self, mut packet_to_route: BmNetworkPacket) -> bool {
+        // Check if we have route to destination
+        if let Some(next_hop) = self.stack.get_next_hop(packet_to_route.get_destination()) {
+            // Update source with our network id
+            packet_to_route.set_source(self.stack.get_local_network_id());
+            // Increment hop count
+            packet_to_route.increment_hop_count();
+            // Update next_hop from routing table
+            packet_to_route.set_next_hop(Some(next_hop));
+            // Set Ok to transmit
+            packet_to_route.ok_to_transmit = true;
+            // Push updated packet to outbound queue
+            self.outbound.push(packet_to_route).unwrap();
+            return true
+        }
+        false
+    }
+
+    fn send_data_payload(&mut self) {
+        if let Some(working_index) = self.working_outbound_index {
+            let dest_id = self.outbound[working_index].get_destination();
+
+            // Check if we have route to destination
+            if let Some(next_hop) = self.stack.get_next_hop(dest_id) {
+                // Update outbound packet with new next_hop
+                self.outbound[working_index].set_next_hop(Some(next_hop));
+
+                // Mark packet as ok to transmit
+                self.outbound[working_index].ok_to_transmit = true;
+
+                // Check if Ack is required and transition to next state
+                if self.outbound[working_index].get_info().required_ack() {
+                    defmt::info!("run_engine: SendingPayload -> WaitingForAck");
+                    self.engine_status = BmEngineStatus::WaitingForAck;
+                }
+                else {                    
+                    defmt::info!("run_engine: SendingPayload -> Complete");
+                    self.engine_status = BmEngineStatus::Complete;
+                }
+            }
+            else {
+                defmt::warn!("run_engine: SendingPayload -> ErrorNoRoute");
+
+                // Transition to complete
+                self.engine_status = BmEngineStatus::ErrorNoRoute; 
+            }
+        }
+        else {
+            defmt::error!("run_engine: SendingPayload, no working index");
+        }
+    }
+
+    // Function to find the data payload packet in the outbound queue. Save that index
+    fn select_data_packet(&mut self) -> bool {
+        for (index, pkt) in self.outbound.iter_mut().enumerate() {
+            if pkt.ok_to_transmit == false && 
+               pkt.tx_count == 0 &&
+               pkt.packet_type == BmPacketTypes::DataPayload {
+                self.working_outbound_index = Some(index);
+                return true
+            }
+        }
+        false
+    }
     
 }

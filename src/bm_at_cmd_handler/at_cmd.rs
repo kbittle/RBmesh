@@ -163,7 +163,6 @@ pub fn cmd_arg_into_msg(argument_buffer: AtCmdStr) -> Option<MessageTuple> {
     // Expected format in the argument buffer: "dest,ack,ttl,ascii payload"
     let args: Vec<&str, 5> = argument_buffer.split(',').collect();
     
-    defmt::error!("get_cmd_arg_as_msg: len={}", args.len());
 
     if args.len() == 4 {
         // Create 3 types expected in the return
@@ -176,7 +175,7 @@ pub fn cmd_arg_into_msg(argument_buffer: AtCmdStr) -> Option<MessageTuple> {
         return Some((network_id, ack_required, ttl, payload))
     }
     else {
-        defmt::error!("Invalid number of arguments.");
+        defmt::error!("cmd_arg_into_msg: invalid args len={}", args.len());
     }
     None
 }

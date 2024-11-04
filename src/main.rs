@@ -1,5 +1,3 @@
-// Blinks the LED on the LoRa-E5_STM32WLE5JC_Module.
-
 #![no_std]
 #![no_main]
 
@@ -137,9 +135,13 @@ mod app {
         let gpiob: PortB = PortB::split(dp.GPIOB, &mut dp.RCC);
         let gpioc: PortC = PortC::split(dp.GPIOC, &mut dp.RCC);
 
-        // Setup LED
+        // Setup LED's
         let mut led1: Output<pins::C0> = Output::default(gpioc.c0, cs);
-        led1.set_level(PinState::Low);
+        let mut led2: Output<pins::C1> = Output::default(gpioc.c1, cs);
+        let mut led3: Output<pins::B5> = Output::default(gpiob.b5, cs);
+        led1.set_level(PinState::Low);        
+        led2.set_level(PinState::Low);
+        led3.set_level(PinState::Low);
 
         // Setup uart1
         let mut uart1: Uart1<pins::B7, pins::B6> =
@@ -229,6 +231,12 @@ mod app {
         }
     }
 
+    // RB Mesh main task
+    //
+    // Responsible for grabbing incoming packets from the radio buffer and processing them 
+    // in the mesh stack. Run the mesh engine. If the mesh stack has any packets ready to 
+    // send, push them to the radio task.
+    //
     #[task(
         shared = [uart1, rtc, radio_inst, mesh_inst],
         local = [buffer_available_to_parse, outbound_buff_avail, status],
@@ -239,7 +247,11 @@ mod app {
             // Pop packet buffer off rx_buffer and free lock before processing
             ctx.shared.radio_inst.lock(|radio_inst| {
                 if radio_inst.rx_buffer.len() > 0 {
+                    defmt::info!("mesh_stack_task: rx_buffer_len={}", radio_inst.rx_buffer.len());
                     *ctx.local.buffer_available_to_parse = radio_inst.rx_buffer.pop();                    
+                }
+                else {
+                    *ctx.local.buffer_available_to_parse = None;
                 }
             });
 
@@ -382,7 +394,7 @@ mod app {
             ).lock(|uart1, at_cmd_resp_inst| {
                 if let Ok(in_char) = uart1.read() {
                     if let Some((rx_cmd_enum, print_help)) = at_cmd_resp_inst.handle_rx_char(in_char) {
-                        defmt::info!("usart1_rx_task: {} {}", rx_cmd_enum, print_help);
+                        defmt::info!("usart1_rx_task: enum={}, help={}", rx_cmd_enum, print_help);
 
                         // Current mechanism to print help
                         if print_help {
@@ -443,8 +455,8 @@ mod app {
                                 let msg_cmd: Option<MessageTuple> = at_cmd::cmd_arg_into_msg(at_cmd_resp_inst.get_cmd_arg());
 
                                 if let Some((network_id, ack_required, ttl, payload)) = msg_cmd {
-                                    defmt::info!("usart1_rx_task: id:{} ack:{} payload_len:{}", 
-                                        network_id, ack_required, payload.len());
+                                    defmt::info!("usart1_rx_task: id:{} ack:{} ttl:{} payload_len:{}", 
+                                        network_id, ack_required, ttl, payload.len());
 
                                     // Load new packet into engine
                                     (

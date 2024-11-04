@@ -53,13 +53,25 @@ impl BmNetworkStack {
         }
     }
 
+    pub fn set_node_error(&mut self, dest_id: NetworkId, millis: TimeType) {
+        if let Some(node_entry) = self.find_node_by_id(dest_id) {
+            // If the node exists, update the route
+            node_entry.record_error(millis);
+        }
+        else {
+            defmt::error!("rb_stack: could not find node");
+        }
+    }
+
     pub fn get_next_hop(&mut self, dest_id: NetworkId) -> NetworkId {
         // Search through node list for dest node
-
-        // look up primary route
-
-        // return network id
-
+        if let Some(node_entry) = self.find_node_by_id(dest_id) {
+            // Get best route
+            if let Some(mut route) = node_entry.get_best_route() {                
+                // Return network id
+                return route.get_next_hop()
+            }
+        }
         None
     }
 

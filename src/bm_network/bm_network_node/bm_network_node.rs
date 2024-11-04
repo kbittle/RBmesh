@@ -7,17 +7,8 @@ use crate::bm_network::{
 };
 use core::fmt::{self};
 
-
-#[derive(Default, Debug, Clone)]
-struct BmNodeMetrics {
-    // Time when node was last heard from
-    timestamp_millis: TimeType,
-    
-    errors: u8,
-}
-
 #[derive(Default, Debug, Clone, PartialEq)]
-struct BmRoute {
+pub struct BmRoute {
     // Next hop address
     next_hop: NetworkId,
     // Number of hops to end point
@@ -27,6 +18,8 @@ struct BmRoute {
     // Rssi for route
     avg_rssi: i32,
     rssi_samples: Vec<RssiType, BM_MAX_RSSI_SAMPLES>,
+    // Failure count
+    failures: u8,
 }
 
 impl BmRoute {
@@ -41,23 +34,25 @@ impl BmRoute {
         // Avergae rssi samples
         self.avg_rssi = self.rssi_samples.iter().map(|&rssi| rssi as i32).sum::<i32>() / self.rssi_samples.len() as i32;
     }
+
+    pub fn get_next_hop(&mut self) -> NetworkId {
+        self.next_hop
+    }
 }
 
 #[derive(Default, Debug, Clone)]
 pub struct BmNodeEntry {
     // Node network address
     pub dest_id: NetworkId,
-    // Metrics for node
-    node_metrics: BmNodeMetrics,
     // Primary route index
-    primary_route_idx: i8,
+    primary_route_idx: Option<usize>,
     // Available routes
     routes: Vec<BmRoute, BM_MAX_DEVICE_ROUTES>,
 }
 
 impl fmt::Display for BmNodeEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Id: {}, Routes: {})", self.dest_id.unwrap(), self.routes.len())
+        write!(f, "Id: {}, Routes: {}", self.dest_id.unwrap(), self.routes.len())
     }
 }
 
@@ -65,16 +60,9 @@ impl BmNodeEntry {
     pub fn new(dest_id: NetworkId) -> BmNodeEntry {
         BmNodeEntry {
             dest_id: dest_id,
-            node_metrics: BmNodeMetrics::default(),
-            primary_route_idx: 0,
+            primary_route_idx: None,
             routes: Vec::new(),
         }
-    }
-
-    pub const fn with_metrics(mut self, millis: TimeType) -> Self {
-        self.node_metrics.timestamp_millis = millis;
-        self.node_metrics.errors = 0;
-        self
     }
 
     pub fn with_route(mut self, next_hop: NetworkId, distance: u8, millis: TimeType, rssi: RssiType) -> Self {
@@ -87,12 +75,17 @@ impl BmNodeEntry {
         self
     }
 
-    pub fn update_metrics(&mut self, src_id: NetworkId, millis: TimeType, rssi: RssiType) {
-        // not sure what to do with these yet
+    pub fn record_error(&mut self, millis: TimeType) {
+        if let Some(route_idx) = self.primary_route_idx {
+            self.routes[route_idx].failures += 1;
+            self.routes[route_idx].timestamp_millis = millis;
+        }
     }
 
     pub fn add_new_route(&mut self, next_hop: NetworkId, distance: u8, millis: TimeType, rssi: RssiType) {
         if self.routes.len() < BM_MAX_DEVICE_ROUTES {
+            defmt::info!("BmNodeEntry: add_new_route");
+
             // Create new route
             let mut new_route = BmRoute {
                 next_hop: next_hop,
@@ -100,28 +93,48 @@ impl BmNodeEntry {
                 timestamp_millis: millis,
                 avg_rssi: 0,
                 rssi_samples: Vec::new(),
+                failures: 0,
             };
             new_route.update_rssi(rssi);
+
             // Add new route to list
             self.routes.push(new_route).unwrap();
+
+            self.determine_primary_route();
         }
         else {
             defmt::error!("BmNodeEntry: route list full");
-            // todo - clean up old routes
+            // TODO - clean up old routes
         }        
     }
 
     pub fn update_route(&mut self, next_hop: NetworkId, distance: u8, millis: TimeType, rssi: RssiType) {
+        let mut route_found = false;
+
         for route in self.routes.iter_mut() {
             // If the route exists update the route data
             if route.next_hop == next_hop {
+                route_found = true;
+
                 route.distance = distance;
                 route.timestamp_millis = millis;
                 route.update_rssi(rssi);
             }
         }
 
-        // TODO - if we didnt find a route, add new route?, clean up stale routes
+        // If we didnt find a route, add new route
+        if !route_found {
+            self.add_new_route(next_hop, distance, millis, rssi);
+        }
+
+        self.determine_primary_route();
+    }
+
+    pub fn get_best_route(&mut self) -> Option<BmRoute> {
+        if let Some(route_idx) = self.primary_route_idx {
+            return Some(self.routes[route_idx].clone())
+        }
+        None
     }
 
     //-----------------------------------------------------------
@@ -134,4 +147,49 @@ impl BmNodeEntry {
         })
     }
 
+    fn determine_primary_route(&mut self) {
+        for (index, route) in self.routes.iter().enumerate() {
+            if let Some(primary_index) = self.primary_route_idx {
+                // Ensure we dont compare primary rpoute against itself
+                if index != primary_index {
+                    if compare_routes(&self.routes[primary_index], route) {
+                        // Update primary route
+                        self.primary_route_idx = Some(index);
+                    }
+                }
+            }
+            else {
+                // Start with first route as primary
+                self.primary_route_idx = Some(index);
+            }
+        }
+    }
+}
+
+// Function to compare two routes.
+// If route2 is better than route1, return true
+// Otherwise return false
+fn compare_routes(route1: &BmRoute, route2: &BmRoute) -> bool {
+    calc_route_metric(route1) > calc_route_metric(route2)
+}
+
+// Calculate metric based off route data. Lower metric number is better.
+//
+//     Hop, Rssi, Errors, Metric
+// Ex. 0    -90   0       90
+//     1    -87   0       117
+//     2    -80   0       140
+//     1    -112  1       192
+fn calc_route_metric(route: &BmRoute) -> i32 {
+    let mut metric: i32 = 0;
+
+    // Prioritize closer routes
+    metric += route.distance as i32 * 30;
+
+    metric += route.avg_rssi * -1;
+
+    // Route failures will penalize the link
+    metric += route.failures as i32 * 50;
+
+    metric
 }

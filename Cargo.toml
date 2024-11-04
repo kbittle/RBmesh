@@ -2,6 +2,7 @@
 name = "RBmesh"
 version = "0.1.0"
 edition = "2021"
+test = false
 
 [profile.release]
 debug = 2

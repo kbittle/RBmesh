@@ -36,3 +36,9 @@ My knock off probe works with this. Does not work with STM programmer software.
 `probe-rs list` to list programmers
 [0]: STLink V2 -- 0483:3748:48 (ST-LINK)
 
+## Hardware:
+3led unit ID is: 5678875
+1led unit ID is: 5677364
+
+AT+MSEND=5678875,true,1,hello
+

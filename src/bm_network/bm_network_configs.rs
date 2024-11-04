@@ -2,8 +2,11 @@
 // Max number of network id's the device can remember. 
 pub const BM_MAX_NET_DEVICES: usize = 100;
 
-// Sizeof(BmNetworkPacketHdr)
-pub const BM_PACKET_HDR_SIZE: usize = 19;
+// Number of retries allowed on acknowledged data packets.
+pub const BM_PACKET_RETRY_COUNT: u8 = 2;
+
+// Pkt type + Sizeof(BmNetworkPacketHdr)
+pub const BM_PACKET_HDR_SIZE: usize = 18;
 
 // Max number of bytes paylaod can support. This should be 255 - sizeof(hdr).
 pub const BM_MAX_PAYLOAD_SIZE: usize = 200;
