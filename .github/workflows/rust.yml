@@ -22,8 +22,7 @@ jobs:
        rm rust-toolchain.toml
        echo "Adding target compiler..."
        rustup target add thumbv7m-none-eabi
-       echo "Setting default target..."
-       rustup default thumbv7m-none-eabi
-       cargo build --release
+       rustup default stable-x86_64-unknown-linux-gnu
+       cargo build --release --target=thumbv7m-none-eabi
     - name: Run tests
       run: cargo test --verbose
