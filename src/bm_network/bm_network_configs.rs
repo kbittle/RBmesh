@@ -23,6 +23,9 @@ pub const BM_MAX_RSSI_SAMPLES: usize = 5;
 // Outbound queue size. Up this later? What if we hold packets for retries?
 pub const BM_OUTBOUND_QUEUE_SIZE: usize = 5;
 
+// Inbound queue size. 
+pub const BM_INBOUND_QUEUE_SIZE: usize = 5;
+
 // NOTE: stack currently lives in ram, so it cannot be that large at the moment.
 // maybe can move some parts to flash some day?
 //

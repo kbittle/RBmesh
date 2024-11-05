@@ -1,5 +1,5 @@
 # RB Mesh
-[![Build](https://github.com/kbittle/RBmesh/actions/workflows/rust.yml/badge.svg)]
+![Build](https://github.com/kbittle/RBmesh/actions/workflows/rust.yml/badge.svg)
 
 A mesh stack written in rust to run on the STM32WL / LoRa-E5 module. Like the LoRaWAN modem software Seed Studio provides with the hardware. This software package will also support a AT command set to interact with the modem. This software package will also supply GPIO support for radio TX/RX and incoming message ring indication.
 

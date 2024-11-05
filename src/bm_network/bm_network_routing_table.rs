@@ -7,7 +7,7 @@ use super::{
 
 
 #[derive(Default, Debug, Clone)]
-pub struct BmNetworkStack {
+pub struct BmNetworkRoutingTable {
     // Local node network id
     network_id: NetworkId,
 
@@ -15,9 +15,9 @@ pub struct BmNetworkStack {
     nodes: Vec<BmNodeEntry, BM_MAX_NET_DEVICES>, // TODO - NodeEntry is ~160bytes, so 16Kb stack consumed
 }
 
-impl BmNetworkStack {
+impl BmNetworkRoutingTable {
     pub fn new(local_network_id: NetworkId) -> Self{
-        BmNetworkStack {
+        BmNetworkRoutingTable {
             network_id: local_network_id,
             nodes: Vec::new(),
         }
