@@ -11,7 +11,7 @@ const MAX_AT_CMD_CHARS: usize = 200;
 // AT Command buffer type
 pub type AtCmdStr = String<MAX_AT_CMD_CHARS>;
 
-// Hopefully these will be stored in flash
+// Constant AT Command strings
 const CONST_AT_COMMAND_STRINGS: &'static [&'static [&str]] = 
 &[
     // Cmd, Resp, Help, Allow Write
@@ -75,6 +75,7 @@ impl defmt::Format for AtCommand {
             AtCommand::RadioStatus => write!(fmt, "RadioStatus"),
 
             AtCommand::AtList => write!(fmt, "AtList"),
+            AtCommand::NewLine => write!(fmt, "NewLine"),
             _ => { write!(fmt, "Unknown") }
         }
     }
@@ -150,7 +151,7 @@ impl AtCommand {
         unwrap!(str_out.push_str("Available Commands:"));
 
         // Append all supported commands
-        for (index, entry) in CONST_AT_COMMAND_STRINGS.iter().enumerate() {
+        for entry in CONST_AT_COMMAND_STRINGS.iter() {
             unwrap!(str_out.push_str("\n\r"));
             unwrap!(str_out.push_str(entry[0]));
         }
@@ -163,7 +164,6 @@ pub fn cmd_arg_into_msg(argument_buffer: AtCmdStr) -> Option<MessageTuple> {
     // Expected format in the argument buffer: "dest,ack,ttl,ascii payload"
     let args: Vec<&str, 5> = argument_buffer.split(',').collect();
     
-
     if args.len() == 4 {
         // Create 3 types expected in the return
         let network_id = Some(args[0].parse().unwrap());

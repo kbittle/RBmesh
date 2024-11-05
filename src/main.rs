@@ -9,15 +9,14 @@ use panic_probe as _;
 use stm32wlxx_hal::{
     self as hal,
     chrono::{DateTime, NaiveDate, NaiveDateTime, Utc},
-    dma::{AllDma},
     embedded_hal::prelude::*,
-    gpio::{pins, Output, PinState, PortA, PortB, PortC, Exti},
+    gpio::{pins, Output, PinState, PortA, PortB, PortC},
     info::{self, Package, Uid, Uid64},
     pac,
     rcc,
     rng::{self, Rng},
     rtc::{Clk, Rtc},
-    subghz::{SubGhz},
+    subghz::SubGhz,
     uart::{self, Uart1},
 };
 use rtic::app;
@@ -26,6 +25,7 @@ use heapless::{Vec, String}; // fixed capacity `std::Vec`
 
 mod bm_network;
 use bm_network::{
+    bm_network_node::bm_network_node::BmNodeEntry,
     bm_network_engine::BmNetworkEngine,
     bm_network_engine::BmEngineStatus,
 };
@@ -41,6 +41,7 @@ use bm_at_cmd_handler::{
 };
 mod bm_radio_control;
 use bm_radio_control::{
+    bm_radio_control::RadioState,
     bm_radio_control::RadioControl,
     bm_radio_rx_buffer::RadioRxBuffer,
 };
@@ -49,12 +50,6 @@ systick_monotonic!(Mono, 1000);
 
 #[app(device = stm32wlxx_hal::pac, peripherals = true, dispatchers = [USART1])]
 mod app {
-    use core::{borrow::BorrowMut, clone, fmt::Debug, ops::Deref};
-
-    use at_cmd::AtCommand;
-    use bm_network::bm_network_node::bm_network_node::BmNodeEntry;
-    use bm_radio_control::bm_radio_control::RadioState;
-
     use super::*;
 
     #[shared]
@@ -69,9 +64,10 @@ mod app {
     // Locals can only be used by 1 task
     #[local]
     struct Local {
-        // Blink task
-        led1: Output<pins::C0>,
-        state: bool,
+        // LED task
+        ring_indicator: Output<pins::C0>,
+        tx_indicator: Output<pins::C1>,
+        rx_indicator: Output<pins::B5>,
 
         // At Cmd task
         received_cmd: Option<(AtCommand,bool)>,
@@ -127,8 +123,10 @@ mod app {
         // Initialize the systick interrupt & obtain the token to prove that we did
         Mono::start(ctx.core.SYST, 48_000_000);
         
-        let dma: AllDma = AllDma::split(dp.DMAMUX, dp.DMA1, dp.DMA2, &mut dp.RCC);
-        let rng: Rng = Rng::new(dp.RNG, rng::Clk::Msi, &mut dp.RCC);
+        // TBD how to use RNG in mesh. 
+        // Need to add slop time on rebroadcasts?
+        // Check airspace ebfore TX
+        //let rng: Rng = Rng::new(dp.RNG, rng::Clk::Msi, &mut dp.RCC);
 
         // Setup GPIO
         let gpioa: PortA = PortA::split(dp.GPIOA, &mut dp.RCC);
@@ -152,9 +150,9 @@ mod app {
         // Setup sub GHz radio instance
         let mut radio_inst = RadioControl::new(
             SubGhz::new(dp.SPI3,  &mut dp.RCC),
-            Output::default(gpiob.b0, cs),
-            Output::default(gpioa.a4, cs),
-            Output::default(gpioa.a5, cs),
+            Output::default(gpiob.b0, cs), // TXCO Pwr
+            Output::default(gpioa.a4, cs), // RF Ctrl 1
+            Output::default(gpioa.a5, cs), // RF Ctrl 2
         );
         // Setup LoRa-E5 specific gpio's
         radio_inst.power_on();
@@ -173,7 +171,7 @@ mod app {
         defmt::info!("Mesh Stack Init Complete");
 
         // Start software tasks
-        blinkTask::spawn().unwrap();
+        led_task::spawn().unwrap();
         usart1_rx_task::spawn().unwrap();
         mesh_stack_task::spawn().unwrap();
 
@@ -191,8 +189,9 @@ mod app {
             }, 
             Local 
             {
-                led1, 
-                state: false,
+                ring_indicator: led1,
+                tx_indicator: led2,
+                rx_indicator: led3,
                 received_cmd: None,
                 resp_value: AtCmdStr::new(),
                 buffer_available_to_parse: None,
@@ -202,32 +201,43 @@ mod app {
         )
     }
 
-    // Blink task currently used as a visual watchdog
+    // LED task will poll all other instances for data needed to iluminate the LED's
     #[task(
-        shared = [rtc],
-        local = [led1, state],
+        shared = [radio_inst, mesh_inst],
+        local = [ring_indicator, tx_indicator, rx_indicator],
         priority = 2,
     )]
-    async fn blinkTask(mut ctx: blinkTask::Context) {
+    async fn led_task(mut ctx: led_task::Context) {
         loop {
+            ctx.shared.mesh_inst.lock(|mesh_inst| {
+                // Illuminate ring indicator when there is a message waiting for us
+                let msg_cnt = mesh_inst.get_inbound_message_count() as u32;
+                if msg_cnt > 0 {
+                    ctx.local.ring_indicator.set_level_high();
+                }
+                else {
+                    ctx.local.ring_indicator.set_level_low();
+                }
+            });
 
-            if *ctx.local.state {
-                ctx.local.led1.set_level_high();
-                *ctx.local.state = false;
-            } else {
-                ctx.local.led1.set_level_low();
-                *ctx.local.state = true;
-            }
-            Mono::delay(1000.millis()).await;
-
-            // ctx.shared.rtc.lock(|rtc| match rtc.date_time() {
-            //     Some(date_time) => {
-            //         defmt::info!("RTC={}", defmt::Display2Format(&date_time));
-            //     }
-            //     None => {
-            //         defmt::warn!("RTC is not setup");
-            //     }
-            // });            
+            ctx.shared.radio_inst.lock(|radio_inst| {
+                // poll radio inst for tx/rx state
+                // TODO - this may not work as we are only checking every 100ms
+                //   and it could be blocked by IRQ handler??
+                match radio_inst.current_state {
+                    RadioState::Transmitting => {
+                        ctx.local.tx_indicator.set_level_high();
+                    }
+                    RadioState::Receiving => {
+                        ctx.local.rx_indicator.set_level_high();
+                    }                    
+                    _ => {
+                        ctx.local.tx_indicator.set_level_low();
+                        ctx.local.rx_indicator.set_level_low();
+                    }
+                }
+            });
+            Mono::delay(100.millis()).await;           
         }
     }
 
@@ -394,7 +404,7 @@ mod app {
             ).lock(|uart1, at_cmd_resp_inst| {
                 if let Ok(in_char) = uart1.read() {
                     if let Some((rx_cmd_enum, print_help)) = at_cmd_resp_inst.handle_rx_char(in_char) {
-                        defmt::info!("usart1_rx_task: enum={}, help={}", rx_cmd_enum, print_help);
+                        defmt::info!("usart1_rx_task: cmd={}, help={}", rx_cmd_enum, print_help);
 
                         // Current mechanism to print help
                         if print_help {
@@ -439,7 +449,7 @@ mod app {
                                     &mut ctx.shared.mesh_inst
                                 ).lock(|mesh_inst| {
                                     // Convert u32 ID to String<>
-                                    let str_resp: String<10> = String::try_from(mesh_inst.stack.get_local_network_id().unwrap()).unwrap();
+                                    let str_resp: String<10> = String::try_from(mesh_inst.table.get_local_network_id().unwrap()).unwrap();
                         
                                     // Send ID response
                                     write_slice_uart1(uart1, 
@@ -450,26 +460,52 @@ mod app {
                                     );
                                 });                            
                             }
+                            AtCommand::AtMsgReceiveCnt => {
+                                ctx.shared.mesh_inst.lock(|mesh_inst| {
+                                    // Convert usize count to String<>
+                                    let msg_cnt = mesh_inst.get_inbound_message_count() as u32;
+                                    let str_resp: String<10> = String::try_from(msg_cnt).unwrap();
+                        
+                                    defmt::info!("AtMsgReceiveCnt: cnt:{}", msg_cnt);
+
+                                    // Send msg count response
+                                    write_slice_uart1(uart1, 
+                                        at_cmd_resp_inst.prepare_response(
+                                            rx_cmd_enum, 
+                                            str_resp.trim(),
+                                        )
+                                    );
+                                });
+                            }
+                            AtCommand::AtMsgReceive => {
+                                ctx.shared.mesh_inst.lock(|mesh_inst| {
+                                    if let Some(in_msg) = mesh_inst.get_inbound_message() {
+                                        defmt::info!("AtMsgReceive: in_msg:{}", defmt::Display2Format(&in_msg));
+                                    }
+                                    else {
+                                        defmt::info!("AtMsgReceive: No msg available");
+                                        write_str_uart1(uart1, "\n\r0 Messages\n\r>");
+                                    }
+                                });
+                            }
                             AtCommand::AtMsgSend => {
                                 // Parse argument String buffer into tuple
                                 let msg_cmd: Option<MessageTuple> = at_cmd::cmd_arg_into_msg(at_cmd_resp_inst.get_cmd_arg());
 
                                 if let Some((network_id, ack_required, ttl, payload)) = msg_cmd {
-                                    defmt::info!("usart1_rx_task: id:{} ack:{} ttl:{} payload_len:{}", 
+                                    defmt::info!("AtMsgSend: id:{} ack:{} ttl:{} payload_len:{}", 
                                         network_id, ack_required, ttl, payload.len());
 
                                     // Load new packet into engine
-                                    (
-                                        &mut ctx.shared.mesh_inst,
-                                        &mut ctx.shared.rtc
-                                    ).lock(|mesh_inst, rtc| {
+                                    ctx.shared.mesh_inst.lock(|mesh_inst| {
                                         mesh_inst.initiate_packet_transfer(network_id, ack_required, ttl, payload);
                                     });
                     
                                     // Do not print Ok response here. Mesh engine state machine will drive UI responses 
                                 }
                                 else {
-                                    defmt::error!("Invalid command format");
+                                    defmt::error!("AtMsgSend: Invalid command format");
+                                    write_str_uart1(uart1, "\n\rCmd Error\n\r>");
                                 }                           
                             }
                             AtCommand::TestMessage => {
@@ -492,11 +528,11 @@ mod app {
                                 ).lock(|mesh_inst| {
                                     // Prints out 1 line per node in table.
                                     // Note: May need to refactor this when we support more nodes.
-                                    let num_nodes = mesh_inst.stack.get_num_nodes();
+                                    let num_nodes = mesh_inst.table.get_num_nodes();
                                     if num_nodes > 0 {
                                         let mut output_str: String<100> = String::new();
                                         for node_idx in 0..num_nodes {
-                                            if let Some(node_data) = mesh_inst.stack.get_node_by_idx(node_idx) {
+                                            if let Some(node_data) = mesh_inst.table.get_node_by_idx(node_idx) {
                                                 // Write struct to String. Formatter is implemented in node file
                                                 write!(&mut output_str, "\n\r{}", node_data).unwrap();
                                                 write_str_uart1(uart1, output_str.as_str());
@@ -538,7 +574,7 @@ mod app {
                                 write_str_uart1(uart1, "\n\r>");
                             }
                             AtCommand::Unknown => {
-                                // Dont do anything for unknowns
+                                write_str_uart1(uart1, "\n\rCmd Error\n\r>");
                             }
                             _ => {
                                 defmt::warn!("usart1_rx_loop: Unhandled at command");

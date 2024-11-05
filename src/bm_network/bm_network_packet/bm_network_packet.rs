@@ -7,7 +7,9 @@ use crate::bm_network::{
 use core::fmt::{self};
 
 // Buffer size of hdr + payload
-pub type BmNetworkPacketPayload = Vec<u8, BM_MAX_OTA_SIZE>;
+pub type BmNetworkOtaPacket = Vec<u8, BM_MAX_OTA_SIZE>;
+// Vec type with just the size3 of the payload
+pub type BmNetworkPacketPayload = Vec<u8, BM_MAX_PAYLOAD_SIZE>;
 
 // Max TTL and hop count value
 const MAX_TTL_HOP_CNT: u8 = 7;
@@ -50,10 +52,6 @@ impl fmt::Display for BmPacketTypes {
 }
 
 impl BmPacketTypes {
-    // This has to be a const fn
-    const fn into_bits(self) -> u8 {
-        self as _
-    }
     const fn from_bits(value: u8) -> Self {
         match value {
             0 => Self::BcastNeighborTable,
@@ -142,6 +140,14 @@ impl BmNetworkRoutingHdr {
     }
 }
 
+#[derive(Default, Clone, Debug, PartialEq)]
+pub enum TransmitState {
+    #[default]
+    Waiting,
+    Ok,
+    Complete,
+}
+
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct BmNetworkPacket {
     // Packet enumeration
@@ -152,14 +158,20 @@ pub struct BmNetworkPacket {
     payload: Option<BmNetworkPacketPayload>,
 
     // Metadata (Note: Does not go OTA)
-    pub ok_to_transmit: bool,
+    pub tx_state: TransmitState,
     pub tx_complete_timestamp: Option<i64>,
     pub tx_count: u8,
+    pub wait_for_reply: bool,
 }
 
 impl fmt::Display for BmNetworkPacket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Type: {}, Dest: {}, Ack: {}", self.packet_type, self.routing_hdr.dest.unwrap_or(0), self.routing_hdr.info.required_ack())
+        write!(f, "Type:{}, Src:{}, Dst:{}, Ack:{}", 
+            self.packet_type, 
+            self.routing_hdr.src.unwrap_or(0), 
+            self.routing_hdr.dest.unwrap_or(0), 
+            self.routing_hdr.info.required_ack()
+        )
     }
 }
 
@@ -174,9 +186,10 @@ impl BmNetworkPacket {
                 .with_orig(orig)
                 .with_dest(dest),
             payload: new_payload,
-            ok_to_transmit: false,
+            tx_state: TransmitState::Waiting,
             tx_complete_timestamp: None,
             tx_count: 0,
+            wait_for_reply: false,
         }
     }
 
@@ -185,18 +198,13 @@ impl BmNetworkPacket {
         self
     }
 
-    // pub const fn with_ttl(mut self, new_ttl: u8) -> Self {
-    //     self.routing_hdr = self.routing_hdr.set_ttl(new_ttl);
-    //     self
-    // }
+    pub const fn with_ok_to_transmit(mut self) -> Self {
+        self.tx_state = TransmitState::Ok;
+        self
+    }
 
-    // pub const fn with_ack(mut self, new_ack: bool) -> Self {
-    //     self.routing_hdr = self.routing_hdr.with_ack_required(new_ack);
-    //     self
-    // }
-
-    pub const fn is_ok_to_transmit(mut self) -> Self {
-        self.ok_to_transmit = true;
+    pub const fn with_wait_for_reply(mut self) -> Self {
+        self.wait_for_reply = true;
         self
     }
 
@@ -236,6 +244,18 @@ impl BmNetworkPacket {
         }
         
     }
+    pub fn set_ok_to_transmit(&mut self) {
+        self.tx_state = TransmitState::Ok;
+    }
+    pub fn is_ok_to_transmit(&mut self) -> bool {
+        self.tx_state == TransmitState::Ok
+    }
+    pub fn set_wait_for_reply(&mut self) {
+        self.wait_for_reply = true;
+    }
+    pub fn is_waiting_for_reply(&mut self) -> bool {
+        self.wait_for_reply
+    }
 
     // Mutation functions
     pub fn from(length: usize, buffer: &mut [u8]) -> Option<BmNetworkPacket> {
@@ -268,15 +288,16 @@ impl BmNetworkPacket {
                 },
                 payload,
                 // Init metadata
-                ok_to_transmit: false,
+                tx_state: TransmitState::Waiting,
                 tx_complete_timestamp: None,
                 tx_count: 0,
+                wait_for_reply: false,
             }
         )
     }
 
-    pub fn to_bytes(&mut self) -> Option<BmNetworkPacketPayload> {
-        let mut out_buffer: BmNetworkPacketPayload = Vec::new();
+    pub fn to_bytes(&mut self) -> Option<BmNetworkOtaPacket> {
+        let mut out_buffer: BmNetworkOtaPacket = Vec::new();
 
         // Copy packet to vector buffer
         if out_buffer.push(self.packet_type.clone() as u8).is_err() { return None; }

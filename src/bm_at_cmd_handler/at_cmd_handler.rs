@@ -6,6 +6,9 @@ use crate::bm_at_cmd_handler::at_cmd::{
     AtCommand,
 };
 
+const BACKSPACE: u8 = 0x7F; // DEL sent when you hit backspace
+const CARRIAGE_RETURN: u8 = 0x0D;
+
 #[derive(Clone, PartialEq)]
 pub struct AtCmdResp {
     // Buffer for incoming at commands
@@ -34,13 +37,13 @@ impl AtCmdResp {
         let mut print_help = false;
         
         // If enter character is received, handle command
-        if in_char == b'\r' {
+        if in_char == CARRIAGE_RETURN {
             if self.cmd_buffer.len() == 0 {
-                defmt::info!("new line");
+                //defmt::info!("new line");
                 return Some((AtCommand::NewLine, false));
             }
             else if self.cmd_buffer.len() < 2 {
-                defmt::info!("Command too short");
+                //defmt::info!("Command too short");
 
                 // Clear command buffer
                 self.cmd_buffer.clear();
@@ -110,7 +113,12 @@ impl AtCmdResp {
             
             return Some((command_accepted, print_help))
         }
-        else {            
+        else if in_char == BACKSPACE {
+            if self.cmd_buffer.len() > 0 {
+                self.cmd_buffer.pop().unwrap();                
+            }
+        }
+        else {      
             // Add char to in buffer
             self.cmd_buffer.push(char::try_from(in_char).unwrap()).unwrap();           
         }
