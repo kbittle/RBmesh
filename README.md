@@ -1,22 +1,24 @@
 # RB Mesh
+[![Build](https://github.com/kbittle/RBmesh/actions/workflows/rust.yml/badge.svg)]
 
-A mesh stack written in rust to run on the STM32WL / LoRa-E5 module.
+A mesh stack written in rust to run on the STM32WL / LoRa-E5 module. Like the LoRaWAN modem software Seed Studio provides with the hardware. This software package will also support a AT command set to interact with the modem. This software package will also supply GPIO support for radio TX/RX and incoming message ring indication.
 
-## Commands:
+This design takes concepts from the RadioHead library to form routes between nodes. Combined with a volatile RAM based routing table to store those paths. Message routes are prioritized by shortest distance and then by best signal strength. 
 
-General rust/cargo command to initialize project space:
+## Build/Run/Test Commands:
+General rust/cargo command to initialize project space:<br />
 `Cargo init RBmesh`
 
-General rust/cargo command to build application:
+General rust/cargo command to build application:<br />
 `Cargo build --release`
 
-General rust/cargo command to run tests: **(have not added tests yet)**
+General rust/cargo command to run tests: **(have not added tests yet)**<br />
 `cargo test --features stm32wle5`
 
-Command to load code on platform: **requires probe-rs**
+Command to load code on platform: **requires probe-rs**<br />
 `cargo flash --release --chip STM32WLE5JC`
 
-Command to load and debug code on platform: **requires probe-rs**
+Command to load and debug code on platform: **requires probe-rs**<br />
 `cargo embed --release`
 
 ## Usefull links:
@@ -37,8 +39,8 @@ My knock off probe works with this. Does not work with STM programmer software.
 [0]: STLink V2 -- 0483:3748:48 (ST-LINK)
 
 ## Hardware:
-3led unit ID is: 5678875
-1led unit ID is: 5677364
+3 led unit ID is: 5678875<br />
+1 led unit ID is: 5677364<br />
 
 AT+MSEND=5678875,true,1,hello
 
