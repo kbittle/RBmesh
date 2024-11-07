@@ -1,4 +1,4 @@
-use heapless::{self, Vec, String}; // fixed capacity `std::Vec`
+use heapless::{self, Vec}; // fixed capacity `std::Vec`
 use defmt::unwrap;
 
 use crate::bm_at_cmd_handler::at_cmd::{

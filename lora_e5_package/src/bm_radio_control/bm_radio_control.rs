@@ -1,20 +1,19 @@
 use defmt::{unwrap, write};
 use defmt_rtt as _; // global logger
-use core::{default, time::Duration};
+use core::time::Duration;
 use stm32wlxx_hal::{
     gpio::{pins, Output},
     spi::{SgMiso, SgMosi},
     subghz::{
-        self, rfbusys, wakeup, AddrComp, CalibrateImage, CfgIrq, CmdStatus, CodingRate, CrcType,
-        FallbackMode, 
-        GenericPacketParams, HeaderType, Irq, IrqLine, LoRaBandwidth, LoRaModParams, LoRaPacketParams,
-        LoRaSyncWord, Ocp, PaConfig, PaSel, PacketType, PktCtrl, PreambleDetection, RampTime, RegMode,
-        RfFreq, SleepCfg, SpreadingFactor, StandbyClk, Startup, Status, StatusMode, SubGhz,
+        self, CfgIrq, CodingRate, FallbackMode, 
+        HeaderType, Irq, LoRaBandwidth, LoRaModParams, LoRaPacketParams,
+        LoRaSyncWord, Ocp, PaConfig, PaSel, PacketType, RampTime, RegMode,
+        RfFreq, SpreadingFactor, StandbyClk, Status, StatusMode, SubGhz,
         TcxoMode, TcxoTrim, Timeout, TxParams,
-    }, Ratio,
+    },
 };
 use heapless::{String, Vec};
-use super::bm_radio_rx_buffer::{RadioRxBuffer, RADIO_MAX_BUFF_SIZE};
+use super::bm_radio_rx_buffer::RadioRxBuffer;
 
 const PREAMBLE_LEN: u16 = 16;
 const DATA_LEN: u8 = 255;
@@ -43,7 +42,6 @@ impl defmt::Format for RadioState {
             RadioState::Receiving => write!(fmt, "Receiving"),
             RadioState::Transmitting => write!(fmt, "Transmitting"),
             RadioState::Failure => write!(fmt, "Failure"),
-            _ => { write!(fmt, "Unknown") }
         }
     }
 }

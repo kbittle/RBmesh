@@ -1,7 +1,7 @@
 use heapless::{self, String, Vec}; // fixed capacity `std::Vec`
 use defmt::{write, unwrap};
-use super::super::bm_network::{
-    NetworkId,
+use bm_network::{
+    NetworkId, 
     bm_network_packet::bm_network_packet::BmNetworkPacketPayload
 };
 

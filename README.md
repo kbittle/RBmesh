@@ -12,14 +12,24 @@ General rust/cargo command to initialize project space:<br />
 General rust/cargo command to build application:<br />
 `Cargo build --release`
 
-General rust/cargo command to run tests: **(have not added tests yet)**<br />
-`cargo test --features stm32wle5`
-
 Command to load code on platform: **requires probe-rs**<br />
 `cargo flash --release --chip STM32WLE5JC`
 
 Command to load and debug code on platform: **requires probe-rs**<br />
 `cargo embed --release`
+
+## Unit Test Progress:
+General rust/cargo command to run tests: **(have not added tests yet)**<br />
+`cargo test --features stm32wle5`
+
+Dont think I will be able to get this to work. Code is targetted for stm32wl, which doesnt support "test".
+https://github.com/rust-lang/cargo/issues/6784
+
+May have a way forward. Moved the lib to its own crate. cd to ..\rb_mesh_lib\ and run the follwing cmd:
+cargo test --target=x86_64-pc-windows-msvc
+
+Will have to refactor the code to not use defmt library as the lib that is linked is only for M cortex's.
+
 
 ## Usefull links:
 https://jonathanklimt.de/electronics/programming/embedded-rust/rust-on-stm32-2/

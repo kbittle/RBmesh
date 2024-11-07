@@ -1,3 +1,5 @@
+#![no_std]
+
 // Device network identifier
 pub type NetworkId = Option<u32>;
 
@@ -12,3 +14,6 @@ pub mod bm_network_engine;
 pub mod bm_network_routing_table;
 pub mod bm_network_node;
 pub mod bm_network_packet;
+
+#[cfg(test)]
+pub mod test;

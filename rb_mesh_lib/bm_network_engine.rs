@@ -1,12 +1,10 @@
-use core::ops::Index;
-
 use heapless::Vec; // fixed capacity `std::Vec`
 use super::{
-    bm_network_configs::*, bm_network_node::bm_network_node::BmNodeEntry, bm_network_packet::bm_network_packet::{
-        BmNetworkHdrInfo, BmNetworkPacket, BmNetworkPacketPayload, BmNetworkRoutingHdr, BmPacketTypes, TransmitState
+    bm_network_configs::*, bm_network_packet::bm_network_packet::{
+        BmNetworkPacket, BmNetworkPacketPayload, BmPacketTypes, TransmitState
     }, bm_network_routing_table::BmNetworkRoutingTable, NetworkId, RssiType, TimeType
 };
-use defmt::{write, unwrap};
+use defmt::write;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub enum BmEngineStatus {

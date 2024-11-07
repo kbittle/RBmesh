@@ -1,6 +1,6 @@
 use heapless::Vec;
 use bitfield_struct::bitfield;
-use crate::bm_network::{
+use super::super::{
     NetworkId, 
     bm_network_configs::*,
 };

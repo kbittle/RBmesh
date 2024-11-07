@@ -1,3 +1,7 @@
+# Ignore project output
 /target
+/lora_e5_package/target
+/rb_mesh_lib/target
+
 # Ignore compiled map file
 *.map

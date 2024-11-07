@@ -8,24 +8,22 @@ use panic_probe as _;
 // panic handler
 use stm32wlxx_hal::{
     self as hal,
-    chrono::{DateTime, NaiveDate, NaiveDateTime, Utc},
+    chrono::{DateTime, Utc},
     embedded_hal::prelude::*,
     gpio::{pins, Output, PinState, PortA, PortB, PortC},
-    info::{self, Package, Uid, Uid64},
+    info::{self},
     pac,
     rcc,
-    rng::{self, Rng},
+    //rng::{self, Rng},
     rtc::{Clk, Rtc},
     subghz::SubGhz,
     uart::{self, Uart1},
 };
 use rtic::app;
 use rtic_monotonics::systick::prelude::*;
-use heapless::{Vec, String}; // fixed capacity `std::Vec`
+use heapless::String; // fixed capacity `std::Vec`
 
-mod bm_network;
 use bm_network::{
-    bm_network_node::bm_network_node::BmNodeEntry,
     bm_network_engine::BmNetworkEngine,
     bm_network_engine::BmEngineStatus,
 };
@@ -137,9 +135,9 @@ mod app {
         let mut led1: Output<pins::C0> = Output::default(gpioc.c0, cs);
         let mut led2: Output<pins::C1> = Output::default(gpioc.c1, cs);
         let mut led3: Output<pins::B5> = Output::default(gpiob.b5, cs);
-        led1.set_level(PinState::Low);        
-        led2.set_level(PinState::Low);
-        led3.set_level(PinState::Low);
+        led1.set_level(PinState::High);        
+        led2.set_level(PinState::High);
+        led3.set_level(PinState::High);
 
         // Setup uart1
         let mut uart1: Uart1<pins::B7, pins::B6> =

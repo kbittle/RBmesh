@@ -1,11 +1,11 @@
 use defmt_rtt as _; // global logger
-use defmt::unwrap;
-use heapless::{Vec, String}; // fixed capacity `std::Vec`
-use crate::bm_network::{
+use heapless::Vec; // fixed capacity `std::Vec`
+use super::super::{
     NetworkId, RssiType, TimeType,
     bm_network_configs::*,
 };
 use core::fmt::{self};
+use core::option::Option::{self, Some, None};
 
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct BmRoute {
