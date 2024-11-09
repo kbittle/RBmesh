@@ -1,4 +1,6 @@
-use defmt::{unwrap, write};
+use bm_network::TimeType;
+use defmt::{unwrap, write as defmt_write};
+use core::fmt::Write;
 use defmt_rtt as _; // global logger
 use core::time::Duration;
 use stm32wlxx_hal::{
@@ -13,20 +15,20 @@ use stm32wlxx_hal::{
     },
 };
 use heapless::{String, Vec};
-use super::bm_radio_rx_buffer::RadioRxBuffer;
+use super::radio_rx_buffer::RadioRxBuffer;
 
 const PREAMBLE_LEN: u16 = 16;
 const DATA_LEN: u8 = 255;
 const RADIO_RX_BUFFER_SIZE: usize = 3;
 
 enum RfSwitchType {
-    RfSwitchOff,
-    RfSwitchRx,
-    RfSwitchTxLp,
-    RfSwitchTxHp
+    Off,
+    Rx,
+    TxLp,
+    TxHp
 }
 
-#[derive(Default, Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Copy, Clone, PartialEq)]
 pub enum RadioState {
     #[default]
     Idle,
@@ -38,10 +40,10 @@ pub enum RadioState {
 impl defmt::Format for RadioState {
     fn format(&self, fmt: defmt::Formatter) {
         match self {
-            RadioState::Idle => write!(fmt, "Idle"),
-            RadioState::Receiving => write!(fmt, "Receiving"),
-            RadioState::Transmitting => write!(fmt, "Transmitting"),
-            RadioState::Failure => write!(fmt, "Failure"),
+            RadioState::Idle => defmt_write!(fmt, "Idle"),
+            RadioState::Receiving => defmt_write!(fmt, "Receiving"),
+            RadioState::Transmitting => defmt_write!(fmt, "Transmitting"),
+            RadioState::Failure => defmt_write!(fmt, "Failure"),
         }
     }
 }
@@ -72,6 +74,8 @@ pub struct RadioControl {
     pub rx_buffer: Vec<RadioRxBuffer, RADIO_RX_BUFFER_SIZE>,
     // Tx/Rx/Idle state
     pub current_state: RadioState,
+    // Timestamp when preamble started
+    preamble_start_time: Option<TimeType>,
 }
 
 impl RadioControl {
@@ -118,6 +122,7 @@ impl RadioControl {
             },
             rx_buffer: Vec::new(),
             current_state: RadioState::default(),
+            preamble_start_time: None,
         }
     }
 
@@ -129,7 +134,7 @@ impl RadioControl {
         self.gpio_txco_pwr.set_level_high();
 
         //Turns On in Rx Mode the RF Switch
-        self.configure_rf_switch(RfSwitchType::RfSwitchRx);
+        self.configure_rf_switch(RfSwitchType::Rx);
 
         // This crashes
         // unwrap!(unsafe 
@@ -215,25 +220,29 @@ impl RadioControl {
     }
 
     pub fn get_status(&mut self) -> String<100> {
+        let mut output_str: String<100> = String::new();
+        let mut stat_mode = "Error";
         let (status, irq_status) = unwrap!(self.radio.irq_status());
         
-        defmt::info!("get_status: status={} irq={:#X} busy={}", status, irq_status, subghz::rfbusys());
+        defmt::info!("get_status: status={} irq={:#X} busy={}", status, irq_status, subghz::rfbusys());        
 
+        // StatusMode is only supported by defmt, not core::fmt.
         if status.mode().is_ok() {
             match status.mode().unwrap() {
-                StatusMode::Rx => { String::try_from("RX Mode").unwrap() }
-                StatusMode::Tx => { String::try_from("TX Mode").unwrap() }
-                StatusMode::StandbyHse => { String::try_from("Standby Mode").unwrap() }
-                _ => { String::try_from("Unknown Mode").unwrap() }
+                StatusMode::StandbyRc => { stat_mode = "Standby mode with RC 13MHz"; }
+                StatusMode::StandbyHse => { stat_mode = "Standby Mode"; }
+                StatusMode::Rx => { stat_mode = "RX Mode"; }
+                StatusMode::Tx => { stat_mode = "TX Mode"; }
+                StatusMode::Fs => { stat_mode = "Frequency Synthesis Mode"; }
             }
         }
-        else {
-            String::try_from("Error").unwrap()
-        }        
+
+        write!(&mut output_str, "mode={}, irq={:#X} busy={}", stat_mode, irq_status, subghz::rfbusys()).unwrap();
+        output_str       
     }
 
     // Radio interrupt handler
-    pub fn locked_radio_irq_handler(&mut self) 
+    pub fn locked_radio_irq_handler(&mut self, millis: TimeType) -> RadioState
     {
         let (status, irq_status) = unwrap!(self.radio.irq_status());
         if irq_status & Irq::TxDone.mask() != 0 {
@@ -250,20 +259,23 @@ impl RadioControl {
             unwrap!(self.radio.clear_irq_status(Irq::PreambleDetected.mask())); 
 
             // Set state to receiving to prevent transmitting while radio is mid rx.
-            // Need to add timeout before enabling this feature
-            //self.current_state = RadioState::Receiving;       
+            self.current_state = RadioState::Receiving;
+            // Record time of preamble
+            self.preamble_start_time = Some(millis);
         } else if irq_status & Irq::RxDone.mask() != 0 {
             let (_status, len, ptr) = unwrap!(self.radio.rx_buffer_status());
             defmt::info!("RxDone len={} ptr={} {} irq={:#X}", len, ptr, status, irq_status);
 
+            // Reset module vars
             self.current_state = RadioState::Idle;
+            self.preamble_start_time = None;
 
             // move this to preamble???
             let rx_rssi = self.radio.rssi_inst();
 
             if self.rx_buffer.len() >= RADIO_RX_BUFFER_SIZE {
                 defmt::error!("Receive buffer is full!");
-                return
+                return self.current_state
             }
 
             // Store in some rx buffer, dont do processing in irq handler
@@ -289,6 +301,27 @@ impl RadioControl {
             defmt::error!("Unhandled IRQ: {:#X} {}", irq_status, status);
             unwrap!(self.radio.clear_irq_status(irq_status));
         }
+        self.current_state
+    }
+
+    pub fn locked_radio_cycle_checks(&mut self, millis: TimeType) {
+        // Check for timeout receiving packet after receiving preamble. This logic is put in 
+        // place to block us from transmitting while another device may be mid transmit. A 
+        // preamble can be detected when the spreading factor of the packet does not match
+        // the receiver settings. In this case the timeout logic will correct the radio state.
+        if self.current_state == RadioState::Receiving {
+            if let Some(start_time) = self.preamble_start_time {
+                if millis > start_time + 5000 {
+                    defmt::warn!("locked_radio_update: preamble timeout");
+
+                    self.current_state = RadioState::Idle;
+                    self.preamble_start_time = None;
+                }
+            }
+            else {
+                defmt::error!("locked_radio_update: unable to decode preamble start time");
+            }
+        }  
     }
 
     //-----------------------------------------------------------
@@ -300,7 +333,7 @@ impl RadioControl {
         unwrap!(self.radio.set_standby(StandbyClk::Hse));
 
         // Set RF switch
-        self.configure_rf_switch(RfSwitchType::RfSwitchTxHp);
+        self.configure_rf_switch(RfSwitchType::TxHp);
 
         // Load packet in buffer and bytes to send
         unwrap!(self.radio.write_buffer(0, data));
@@ -318,7 +351,7 @@ impl RadioControl {
 
     fn do_receive(&mut self) {
         // Set rf switch
-        self.configure_rf_switch(RfSwitchType::RfSwitchRx);
+        self.configure_rf_switch(RfSwitchType::Rx);
         // Set for full length read
         self.config.pkt_params = self.config.pkt_params.set_payload_len(255);
         unwrap!(self.radio.set_lora_packet_params(&self.config.pkt_params));
@@ -332,19 +365,19 @@ impl RadioControl {
     // Transmit(high output power, SMPS mode): PA4=0, PA5=1
     fn configure_rf_switch(&mut self, mode: RfSwitchType) {
         match mode {
-            RfSwitchType::RfSwitchOff => {
+            RfSwitchType::Off => {
                 self.gpio_rf_ctrl_1.set_level_low();
                 self.gpio_rf_ctrl_2.set_level_low();
             },
-            RfSwitchType::RfSwitchRx => {
+            RfSwitchType::Rx => {
                 self.gpio_rf_ctrl_1.set_level_high();
                 self.gpio_rf_ctrl_2.set_level_low();
             },
-            RfSwitchType::RfSwitchTxLp => {
+            RfSwitchType::TxLp => {
                 self.gpio_rf_ctrl_1.set_level_high();
                 self.gpio_rf_ctrl_2.set_level_high();
             },
-            RfSwitchType::RfSwitchTxHp => {
+            RfSwitchType::TxHp => {
                 self.gpio_rf_ctrl_1.set_level_low();
                 self.gpio_rf_ctrl_2.set_level_high();
             },

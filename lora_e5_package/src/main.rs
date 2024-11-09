@@ -27,21 +27,21 @@ use bm_network::{
     bm_network_engine::BmNetworkEngine,
     bm_network_engine::BmEngineStatus,
 };
-mod bm_at_cmd_handler;
-use bm_at_cmd_handler::{
+mod at_cmd_handler;
+use at_cmd_handler::{
     at_cmd::{
         self,
         AtCommand,
         AtCmdStr,
         MessageTuple,
     },
-    at_cmd_handler::AtCmdResp,    
+    at_cmd_resp::AtCmdResp,    
 };
-mod bm_radio_control;
-use bm_radio_control::{
-    bm_radio_control::RadioState,
-    bm_radio_control::RadioControl,
-    bm_radio_rx_buffer::RadioRxBuffer,
+mod radio_control;
+use radio_control::{
+    radio_control::RadioState,
+    radio_control::RadioControl,
+    radio_rx_buffer::RadioRxBuffer,
 };
 
 systick_monotonic!(Mono, 1000);
@@ -123,7 +123,7 @@ mod app {
         
         // TBD how to use RNG in mesh. 
         // Need to add slop time on rebroadcasts?
-        // Check airspace ebfore TX
+        // Check airspace before TX
         //let rng: Rng = Rng::new(dp.RNG, rng::Clk::Msi, &mut dp.RCC);
 
         // Setup GPIO
@@ -172,6 +172,7 @@ mod app {
         led_task::spawn().unwrap();
         usart1_rx_task::spawn().unwrap();
         mesh_stack_task::spawn().unwrap();
+        radio_health_task::spawn().unwrap();
 
         write_str_uart1(&mut uart1, "Enter Command: \n\r");
         defmt::info!("Startup Complete");        
@@ -589,17 +590,37 @@ mod app {
         }
     }
 
+    // Interrupt handler for internal radio irq
     // Note: RADIO_IRQ_BUSY doesnt work with DMA version of subghz...
     #[task(
         binds = RADIO_IRQ_BUSY,
-        shared = [radio_inst],
+        shared = [rtc, radio_inst],
         priority = 2,
     )]
-    fn radio_polling_task(mut ctx: radio_polling_task::Context)
+    fn radio_irq(mut ctx: radio_irq::Context)
     {
-        ctx.shared.radio_inst.lock(|radio_inst| {
-            radio_inst.locked_radio_irq_handler();
+        (
+            &mut ctx.shared.rtc,
+            &mut ctx.shared.radio_inst
+        ).lock(|rtc, radio_inst| {
+            let current_millis: i64 = unwrap!(rtc.date_time()).and_utc().timestamp_millis();
+            radio_inst.locked_radio_irq_handler(current_millis);
         });    
+    }
+
+    // Task to cover periodic maintenance of radio.
+    #[task(
+        shared = [rtc, radio_inst],
+        priority = 2,
+    )]
+    async fn radio_health_task(mut ctx: radio_health_task::Context) {
+        (
+            &mut ctx.shared.rtc,
+            &mut ctx.shared.radio_inst
+        ).lock(|rtc, radio_inst| {
+            let current_millis: i64 = unwrap!(rtc.date_time()).and_utc().timestamp_millis();
+            radio_inst.locked_radio_cycle_checks(current_millis);
+        });
     }
 }
 
