@@ -69,7 +69,7 @@ impl BmNetworkEngine {
     pub fn process_packet(&mut self, length: usize, buffer: &mut [u8], millis: TimeType, rssi: RssiType) -> Option<BmNetworkPacket> {
         // Parse packet into struct
         // If we cannot successfully parse packet, return
-        let mut new_packet = BmNetworkPacket::from(length, buffer)?;
+        let mut new_packet = BmNetworkPacket::from(length, buffer)?.with_rssi(rssi);
 
         defmt::info!("process_packet len={}", length);
 

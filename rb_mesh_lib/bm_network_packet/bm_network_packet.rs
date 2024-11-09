@@ -1,5 +1,7 @@
 use heapless::Vec;
 use bitfield_struct::bitfield;
+use crate::RssiType;
+
 use super::super::{
     NetworkId, 
     bm_network_configs::*,
@@ -162,6 +164,7 @@ pub struct BmNetworkPacket {
     pub tx_complete_timestamp: Option<i64>,
     pub tx_count: u8,
     pub wait_for_reply: bool,
+    pub rx_rssi: RssiType,
 }
 
 impl fmt::Display for BmNetworkPacket {
@@ -190,6 +193,7 @@ impl BmNetworkPacket {
             tx_complete_timestamp: None,
             tx_count: 0,
             wait_for_reply: false,
+            rx_rssi: 0,
         }
     }
 
@@ -205,6 +209,11 @@ impl BmNetworkPacket {
 
     pub const fn with_wait_for_reply(mut self) -> Self {
         self.wait_for_reply = true;
+        self
+    }
+
+    pub const fn with_rssi(mut self, rssi: RssiType) -> Self {
+        self.rx_rssi = rssi;
         self
     }
 
@@ -292,6 +301,7 @@ impl BmNetworkPacket {
                 tx_complete_timestamp: None,
                 tx_count: 0,
                 wait_for_reply: false,
+                rx_rssi: 0,
             }
         )
     }

@@ -1,9 +1,5 @@
 use heapless::{self, String, Vec}; // fixed capacity `std::Vec`
 use defmt::{write, unwrap};
-use bm_network::{
-    NetworkId, 
-    bm_network_packet::bm_network_packet::BmNetworkPacketPayload
-};
 
 // Configurable hard coded max at command length
 const MAX_AT_CMD_CHARS: usize = 200;
@@ -30,15 +26,14 @@ const CONST_AT_COMMAND_STRINGS: &'static [&'static [&str]] =
     &["AT?", "", "Command to get list of available commands.", "N"],
 ];
 
-// Supported AT commands.
-
+/// Enumeration of available AT commands.
 // Note: When adding a new command:
 //       - add new enum
 //       - update CONST_AT_COMMAND_STRINGS
 //       - update defmt function
 //       - update AtCommand::from()
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AtCommand {
+pub enum AtCommandSet {
     At,
     AtCsq,
     AtGmr,
@@ -58,63 +53,63 @@ pub enum AtCommand {
     Unknown,
 }
 
-impl defmt::Format for AtCommand {
+impl defmt::Format for AtCommandSet {
     fn format(&self, fmt: defmt::Formatter) {
         match self {
-            AtCommand::At => write!(fmt, "At"),
-            AtCommand::AtCsq => write!(fmt, "AtCsq"),
-            AtCommand::AtGmr => write!(fmt, "AtGmr"),
-            AtCommand::AtId => write!(fmt, "AtId"),
-            AtCommand::AtMsgReceiveCnt => write!(fmt, "AtMsgReceiveCnt"),
-            AtCommand::AtMsgReceive => write!(fmt, "AtMsgReceive"),
-            AtCommand::AtMsgSend => write!(fmt, "AtMsgSend"),
-            AtCommand::TestMessage => write!(fmt, "TestMessage"),
-            AtCommand::RadioConfiguration => write!(fmt, "RadioConfiguration"),
-            AtCommand::RingIndicator => write!(fmt, "RingIndicator"),
-            AtCommand::RoutingTable => write!(fmt, "RoutingTable"),
-            AtCommand::RadioStatus => write!(fmt, "RadioStatus"),
+            AtCommandSet::At => write!(fmt, "At"),
+            AtCommandSet::AtCsq => write!(fmt, "AtCsq"),
+            AtCommandSet::AtGmr => write!(fmt, "AtGmr"),
+            AtCommandSet::AtId => write!(fmt, "AtId"),
+            AtCommandSet::AtMsgReceiveCnt => write!(fmt, "AtMsgReceiveCnt"),
+            AtCommandSet::AtMsgReceive => write!(fmt, "AtMsgReceive"),
+            AtCommandSet::AtMsgSend => write!(fmt, "AtMsgSend"),
+            AtCommandSet::TestMessage => write!(fmt, "TestMessage"),
+            AtCommandSet::RadioConfiguration => write!(fmt, "RadioConfiguration"),
+            AtCommandSet::RingIndicator => write!(fmt, "RingIndicator"),
+            AtCommandSet::RoutingTable => write!(fmt, "RoutingTable"),
+            AtCommandSet::RadioStatus => write!(fmt, "RadioStatus"),
 
-            AtCommand::AtList => write!(fmt, "AtList"),
-            AtCommand::NewLine => write!(fmt, "NewLine"),
+            AtCommandSet::AtList => write!(fmt, "AtList"),
+            AtCommandSet::NewLine => write!(fmt, "NewLine"),
             _ => { write!(fmt, "Unknown") }
         }
     }
 }
 
-impl AtCommand {
+impl AtCommandSet {
     const fn to_u8(self) -> usize {
         self as _
     }
     const fn from(index: usize) -> Self {
         match index {
-            0 => AtCommand::At,
-            1 => AtCommand::AtCsq,
-            2 => AtCommand::AtGmr,
-            3 => AtCommand::AtId,
-            4 => AtCommand::AtMsgReceiveCnt,
-            5 => AtCommand::AtMsgReceive,
-            6 => AtCommand::AtMsgSend,
-            7 => AtCommand::TestMessage,
-            8 => AtCommand::RadioConfiguration,
-            9 => AtCommand::RingIndicator,
-            10 => AtCommand::RoutingTable,
-            11 => AtCommand::RadioStatus,
-            12 => AtCommand::AtList,
-            13 => AtCommand::NewLine,
-            _ => AtCommand::Unknown,
+            0 => AtCommandSet::At,
+            1 => AtCommandSet::AtCsq,
+            2 => AtCommandSet::AtGmr,
+            3 => AtCommandSet::AtId,
+            4 => AtCommandSet::AtMsgReceiveCnt,
+            5 => AtCommandSet::AtMsgReceive,
+            6 => AtCommandSet::AtMsgSend,
+            7 => AtCommandSet::TestMessage,
+            8 => AtCommandSet::RadioConfiguration,
+            9 => AtCommandSet::RingIndicator,
+            10 => AtCommandSet::RoutingTable,
+            11 => AtCommandSet::RadioStatus,
+            12 => AtCommandSet::AtList,
+            13 => AtCommandSet::NewLine,
+            _ => AtCommandSet::Unknown,
         }
     }
 
     pub fn match_command(command: &str) -> Option<Self> {
         for (index, entry) in CONST_AT_COMMAND_STRINGS.iter().enumerate() {
             if entry[0] == command {
-                return Some(AtCommand::from(index));
+                return Some(AtCommandSet::from(index));
             }
         }
         None
     }
 
-    pub fn get_command(cmd: AtCommand) -> Option<&'static str> {    
+    pub fn get_command(cmd: AtCommandSet) -> Option<&'static str> {    
         if cmd.to_u8() < CONST_AT_COMMAND_STRINGS.len() {
             Some(CONST_AT_COMMAND_STRINGS[cmd.to_u8()][0])
         } else {
@@ -122,7 +117,7 @@ impl AtCommand {
         }
     }
     
-    pub fn get_response(cmd: AtCommand) -> Option<&'static str> {    
+    pub fn get_response(cmd: AtCommandSet) -> Option<&'static str> {    
         if cmd.to_u8() < CONST_AT_COMMAND_STRINGS.len() {
             Some(CONST_AT_COMMAND_STRINGS[cmd.to_u8()][1])
         } else {
@@ -130,7 +125,7 @@ impl AtCommand {
         }
     }
     
-    pub fn get_help(cmd: AtCommand) -> Option<&'static str> {    
+    pub fn get_help(cmd: AtCommandSet) -> Option<&'static str> {    
         if cmd.to_u8() < CONST_AT_COMMAND_STRINGS.len() {
             Some(CONST_AT_COMMAND_STRINGS[cmd.to_u8()][2])
         } else {
@@ -138,7 +133,7 @@ impl AtCommand {
         }
     }
 
-    pub fn allow_write(cmd: AtCommand) -> bool {
+    pub fn allow_write(cmd: AtCommandSet) -> bool {
         if cmd.to_u8() < CONST_AT_COMMAND_STRINGS.len() {
             CONST_AT_COMMAND_STRINGS[cmd.to_u8()][3] == "Y"
         } else {
@@ -156,26 +151,4 @@ impl AtCommand {
             unwrap!(str_out.push_str(entry[0]));
         }
     }
-}
-
-pub type MessageTuple = (NetworkId, bool, u8, BmNetworkPacketPayload);
-
-pub fn cmd_arg_into_msg(argument_buffer: AtCmdStr) -> Option<MessageTuple> {
-    // Expected format in the argument buffer: "dest,ack,ttl,ascii payload"
-    let args: Vec<&str, 5> = argument_buffer.split(',').collect();
-    
-    if args.len() == 4 {
-        // Create 3 types expected in the return
-        let network_id = Some(args[0].parse().unwrap());
-        let ack_required = args[1] == "true";
-        let ttl = args[2].parse().unwrap();
-        let mut payload: BmNetworkPacketPayload = Vec::new();
-        unwrap!(payload.extend_from_slice(args[3].as_bytes()));
-        // Combine all types into a tuple
-        return Some((network_id, ack_required, ttl, payload))
-    }
-    else {
-        defmt::error!("cmd_arg_into_msg: invalid args len={}", args.len());
-    }
-    None
 }
