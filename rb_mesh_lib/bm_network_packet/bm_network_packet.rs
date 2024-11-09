@@ -253,6 +253,15 @@ impl BmNetworkPacket {
         }
         
     }
+    pub fn get_payload_len(&mut self) -> usize {
+        if let Some(packet_payload) = &self.payload {
+            return packet_payload.len()
+        }
+        0
+    }
+    pub fn get_payload(&mut self) -> &Option<BmNetworkPacketPayload> {
+        &self.payload
+    }
     pub fn set_ok_to_transmit(&mut self) {
         self.tx_state = TransmitState::Ok;
     }

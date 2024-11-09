@@ -83,29 +83,33 @@ impl BmNodeEntry {
     }
 
     pub fn add_new_route(&mut self, next_hop: NetworkId, distance: u8, millis: TimeType, rssi: RssiType) {
-        if self.routes.len() < BM_MAX_DEVICE_ROUTES {
-            defmt::info!("BmNodeEntry: add_new_route");
-
-            // Create new route
-            let mut new_route = BmRoute {
-                next_hop: next_hop,
-                distance: distance,
-                timestamp_millis: millis,
-                avg_rssi: 0,
-                rssi_samples: Vec::new(),
-                failures: 0,
-            };
-            new_route.update_rssi(rssi);
-
-            // Add new route to list
-            self.routes.push(new_route).unwrap();
-
-            self.determine_primary_route();
-        }
-        else {
+        if self.routes.len() >= BM_MAX_DEVICE_ROUTES {
             defmt::error!("BmNodeEntry: route list full");
-            // TODO - clean up old routes
-        }        
+
+            // TODO - what happens when we have 5 routes that are recent??
+            // Might not want to delete oldest route.
+
+            // Clean up old routes
+            self.delete_oldest_route();
+        }
+
+        defmt::info!("BmNodeEntry: add_new_route");
+
+        // Create new route
+        let mut new_route = BmRoute {
+            next_hop: next_hop,
+            distance: distance,
+            timestamp_millis: millis,
+            avg_rssi: 0,
+            rssi_samples: Vec::new(),
+            failures: 0,
+        };
+        new_route.update_rssi(rssi);
+
+        // Add new route to list
+        self.routes.push(new_route).unwrap();
+
+        self.determine_primary_route();
     }
 
     pub fn update_route(&mut self, next_hop: NetworkId, distance: u8, millis: TimeType, rssi: RssiType) {
@@ -163,6 +167,22 @@ impl BmNodeEntry {
                 self.primary_route_idx = Some(index);
             }
         }
+    }
+
+    fn delete_oldest_route(&mut self) {
+        let mut oldest_route_idx: usize = 0;
+        for (index, route) in self.routes.iter().enumerate() {
+            if oldest_route_idx != index {
+                if route.timestamp_millis <
+                   self.routes[oldest_route_idx].timestamp_millis {
+                    oldest_route_idx = index;
+                }
+            }
+        }
+
+        defmt::info!("deleting oldest route, idx={}", oldest_route_idx);
+
+        self.routes.remove(oldest_route_idx);
     }
 }
 

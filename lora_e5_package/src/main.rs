@@ -469,12 +469,12 @@ mod app {
                             }
                             AtCommandSet::AtMsgReceive => {
                                 ctx.shared.mesh_inst.lock(|mesh_inst| {
-                                    if let Some(in_msg) = mesh_inst.get_inbound_message() {
+                                    if let Some(mut in_msg) = mesh_inst.get_inbound_message() {
                                         defmt::info!("AtMsgReceive: in_msg:{}", defmt::Display2Format(&in_msg));
 
                                         // Format packet at response
                                         write_slice_uart1(uart1, 
-                                            ctx.local.at_resp_gen_inst.fmt_resp_packet_as_str_slice(&in_msg)
+                                            ctx.local.at_resp_gen_inst.fmt_resp_packet_as_str_slice(&mut in_msg)
                                         );
                                     }
                                     else {

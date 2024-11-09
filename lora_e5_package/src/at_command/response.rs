@@ -46,8 +46,7 @@ impl ResponseGenerator {
         unwrap!(self.resp_buffer.push_str(resp_val));
 
         // Add generic OK and >
-        unwrap!(self.resp_buffer.push_str("\n\rOK"));
-        unwrap!(self.resp_buffer.push_str("\n\r>"));
+        unwrap!(self.resp_buffer.push_str("\n\rOK\n\r>"));
 
         self.resp_buffer.as_bytes()
     }
@@ -76,21 +75,39 @@ impl ResponseGenerator {
         unwrap!(self.resp_buffer.push_str(resp_val_str.trim()));
 
         // Add generic OK and >
-        unwrap!(self.resp_buffer.push_str("\n\rOK"));
-        unwrap!(self.resp_buffer.push_str("\n\r>"));
+        unwrap!(self.resp_buffer.push_str("\n\rOK\n\r>"));
 
         self.resp_buffer.as_bytes()
     }
 
-    pub fn fmt_resp_packet_as_str_slice(&mut self, in_msg: &BmNetworkPacket) -> &[u8] {
+    pub fn fmt_resp_packet_as_str_slice(&mut self, in_msg: &mut BmNetworkPacket) -> &[u8] {
         self.resp_buffer.clear();
-        // TODO - print out packet to resp_buffer
-        // what format??
-        // +<originator>,<num hops>,<rssi>,<length?>,<payload>
+        // Print out custom formatted packet to resp_buffer
+        // +<originator>,<num hops>,<rssi>,<length>,<payload(optional)>
         // OK
         // >
-        //
-        // Maybe look into JSON??
+        let payload_len = in_msg.get_payload_len();
+
+        self.resp_buffer.write_fmt(
+            format_args!("\n\r+{},{},{},{}", 
+                in_msg.get_originator().unwrap_or(0),
+                in_msg.get_hop_count(),
+                in_msg.rx_rssi,
+                payload_len,
+            )
+        ).unwrap();
+
+        // If a payload is available append to resp buffer
+        if let Some(payload) = in_msg.get_payload() {
+            unwrap!(self.resp_buffer.push_str(","));
+            for &ch in payload {
+                unwrap!(self.resp_buffer.push(char::try_from(ch).unwrap()));
+            }
+        }
+
+        // Add generic OK and >
+        unwrap!(self.resp_buffer.push_str("\n\rOK\n\r>"));
+
         self.resp_buffer.as_bytes()
     }
 
@@ -131,4 +148,9 @@ impl ResponseGenerator {
     pub fn as_string_slice(&mut self) -> &[u8] {
         self.resp_buffer.as_bytes()
     }
+
+    //-----------------------------------------------------------
+    // Private functions
+    //----------------------------------------------------------- 
+
 }

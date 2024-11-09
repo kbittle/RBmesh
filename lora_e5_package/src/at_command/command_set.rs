@@ -1,8 +1,9 @@
 use heapless::{self, String, Vec}; // fixed capacity `std::Vec`
 use defmt::{write, unwrap};
 
+// TODO - figure out max resp size. Currently recv msg can be payload of 200 + w/e
 // Configurable hard coded max at command length
-const MAX_AT_CMD_CHARS: usize = 200;
+const MAX_AT_CMD_CHARS: usize = 300;
 
 // AT Command buffer type
 pub type AtCmdStr = String<MAX_AT_CMD_CHARS>;
