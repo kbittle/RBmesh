@@ -287,7 +287,9 @@ impl RadioControl {
             // If the read succeeds push buffer in shared memory space
             self.rx_buffer.push(receieved_buffer).unwrap();
             // Clear IRQ
-            unwrap!(self.radio.clear_irq_status(Irq::RxDone.mask()));            
+            unwrap!(self.radio.clear_irq_status(Irq::RxDone.mask()));   
+            // Start another receieve
+            self.do_receive();         
         } else if irq_status & Irq::Timeout.mask() != 0 {
             defmt::warn!("Timeout {}", self.radio.op_error());
             unwrap!(self.radio.clear_irq_status(Irq::Timeout.mask()));
@@ -321,7 +323,9 @@ impl RadioControl {
             else {
                 defmt::error!("locked_radio_update: unable to decode preamble start time");
             }
-        }  
+        }
+
+        // TODO - transmit timeout? Handled by set_tx duration??
     }
 
     //-----------------------------------------------------------

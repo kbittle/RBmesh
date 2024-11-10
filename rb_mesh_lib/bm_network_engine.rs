@@ -1,4 +1,6 @@
-use heapless::Vec; // fixed capacity `std::Vec`
+use heapless::Vec; use crate::BmError;
+
+// fixed capacity `std::Vec`
 use super::{
     bm_network_configs::*, bm_network_packet::bm_network_packet::{
         BmNetworkPacket, BmNetworkPacketPayload, BmPacketTypes, TransmitState
@@ -231,7 +233,9 @@ impl BmNetworkEngine {
         }
     }
 
-    pub fn initiate_packet_transfer(&mut self, dest: NetworkId, ack: bool, ttl: u8, payload: BmNetworkPacketPayload) {
+    pub fn initiate_packet_transfer(&mut self, dest: NetworkId, ack: bool, ttl: u8, payload: BmNetworkPacketPayload) -> BmError {
+        let mut return_value = BmError::None;
+
         if self.engine_status == BmEngineStatus::Idle {
             // Queue up data payload to send
             if self.outbound.push(
@@ -246,7 +250,7 @@ impl BmNetworkEngine {
                 ).with_wait_for_reply()
             ).is_err() {
                 defmt::error!("Error queue full");
-                return
+                return BmError::QueueFull
             }
 
             // Check stack if we have route
@@ -263,7 +267,10 @@ impl BmNetworkEngine {
         }
         else {
             defmt::warn!("initiate_packet_transfer: busy");
-        }            
+            return_value = BmError::Busy;
+        }
+
+        return_value       
     }
 
     pub fn get_inbound_message_count(&mut self) -> usize {

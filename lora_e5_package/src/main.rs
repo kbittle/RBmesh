@@ -47,6 +47,7 @@ systick_monotonic!(Mono, 1000);
 #[app(device = stm32wlxx_hal::pac, peripherals = true, dispatchers = [USART1])]
 mod app {
     use at_command::{parser, response::ResponseGenerator};
+    use bm_network::BmError;
 
     use super::*;
 
@@ -237,7 +238,7 @@ mod app {
                     }
                 }
             });
-            Mono::delay(100.millis()).await;           
+            Mono::delay(100.millis()).await;
         }
     }
 
@@ -494,7 +495,10 @@ mod app {
 
                                     // Load new packet into engine
                                     ctx.shared.mesh_inst.lock(|mesh_inst| {
-                                        mesh_inst.initiate_packet_transfer(network_id, ack_required, ttl, payload);
+                                        if mesh_inst.initiate_packet_transfer(network_id, ack_required, ttl, payload) != BmError::None {
+                                            defmt::error!("AtMsgSend: initiate_packet_transfer error");
+                                            write_str_uart1(uart1, "\n\rMesh Engine Error\n\r>");
+                                        }
                                     });
                     
                                     // Do not print Ok response here. Mesh engine state machine will drive UI responses 
@@ -604,13 +608,17 @@ mod app {
         priority = 2,
     )]
     async fn radio_health_task(mut ctx: radio_health_task::Context) {
-        (
-            &mut ctx.shared.rtc,
-            &mut ctx.shared.radio_inst
-        ).lock(|rtc, radio_inst| {
-            let current_millis: i64 = unwrap!(rtc.date_time()).and_utc().timestamp_millis();
-            radio_inst.locked_radio_cycle_checks(current_millis);
-        });
+        loop {
+            (
+                &mut ctx.shared.rtc,
+                &mut ctx.shared.radio_inst
+            ).lock(|rtc, radio_inst| {
+                let current_millis: i64 = unwrap!(rtc.date_time()).and_utc().timestamp_millis();
+                radio_inst.locked_radio_cycle_checks(current_millis);
+            });
+            
+            Mono::delay(100.millis()).await;           
+        }
     }
 }
 

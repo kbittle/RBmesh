@@ -9,6 +9,14 @@ pub type RssiType = i16;
 // Date Time timestamp
 pub type TimeType = i64;
 
+#[derive(Default, PartialEq)]
+pub enum BmError {
+    #[default]
+    None,
+    Busy,
+    QueueFull,
+}
+
 pub mod bm_network_configs;
 pub mod bm_network_engine;
 pub mod bm_network_routing_table;
