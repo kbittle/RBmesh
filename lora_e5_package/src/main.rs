@@ -8,55 +8,53 @@ use panic_probe as _;
 // panic handler
 use stm32wlxx_hal::{
     self as hal,
-    chrono::{DateTime, NaiveDate, NaiveDateTime, Utc},
+    chrono::{DateTime, Utc},
     embedded_hal::prelude::*,
     gpio::{pins, Output, PinState, PortA, PortB, PortC},
-    info::{self, Package, Uid, Uid64},
+    info::{self},
     pac,
     rcc,
-    rng::{self, Rng},
+    //rng::{self, Rng},
     rtc::{Clk, Rtc},
     subghz::SubGhz,
     uart::{self, Uart1},
 };
 use rtic::app;
 use rtic_monotonics::systick::prelude::*;
-use heapless::{Vec, String}; // fixed capacity `std::Vec`
+use heapless::String; // fixed capacity `std::Vec`
 
-mod bm_network;
 use bm_network::{
-    bm_network_node::bm_network_node::BmNodeEntry,
     bm_network_engine::BmNetworkEngine,
     bm_network_engine::BmEngineStatus,
 };
-mod bm_at_cmd_handler;
-use bm_at_cmd_handler::{
-    at_cmd::{
-        self,
-        AtCommand,
+mod at_command;
+use at_command::{
+    command_set::{
+        AtCommandSet,
         AtCmdStr,
-        MessageTuple,
     },
-    at_cmd_handler::AtCmdResp,    
+    parser::{CommandParser, MessageTuple},    
 };
-mod bm_radio_control;
-use bm_radio_control::{
-    bm_radio_control::RadioState,
-    bm_radio_control::RadioControl,
-    bm_radio_rx_buffer::RadioRxBuffer,
+mod radio_control;
+use radio_control::{
+    radio_control::RadioState,
+    radio_control::RadioControl,
+    radio_rx_buffer::RadioRxBuffer,
 };
 
 systick_monotonic!(Mono, 1000);
 
 #[app(device = stm32wlxx_hal::pac, peripherals = true, dispatchers = [USART1])]
 mod app {
+    use at_command::{parser, response::ResponseGenerator};
+    use bm_network::BmError;
+
     use super::*;
 
     #[shared]
     struct Shared {
         uart1: Uart1<pins::B7, pins::B6>,
         rtc: Rtc,
-        at_cmd_resp_inst: AtCmdResp,
         radio_inst: RadioControl,
         mesh_inst: BmNetworkEngine,
     }
@@ -70,8 +68,9 @@ mod app {
         rx_indicator: Output<pins::B5>,
 
         // At Cmd task
-        received_cmd: Option<(AtCommand,bool)>,
-        resp_value: AtCmdStr,
+        at_cmd_parser_inst: CommandParser,
+        at_resp_gen_inst: ResponseGenerator,
+        received_cmd: Option<(AtCommandSet,bool)>,
 
         // Radio task
         buffer_available_to_parse: Option<RadioRxBuffer>,
@@ -125,7 +124,7 @@ mod app {
         
         // TBD how to use RNG in mesh. 
         // Need to add slop time on rebroadcasts?
-        // Check airspace ebfore TX
+        // Check airspace before TX
         //let rng: Rng = Rng::new(dp.RNG, rng::Clk::Msi, &mut dp.RCC);
 
         // Setup GPIO
@@ -137,9 +136,9 @@ mod app {
         let mut led1: Output<pins::C0> = Output::default(gpioc.c0, cs);
         let mut led2: Output<pins::C1> = Output::default(gpioc.c1, cs);
         let mut led3: Output<pins::B5> = Output::default(gpiob.b5, cs);
-        led1.set_level(PinState::Low);        
-        led2.set_level(PinState::Low);
-        led3.set_level(PinState::Low);
+        led1.set_level(PinState::High);        
+        led2.set_level(PinState::High);
+        led3.set_level(PinState::High);
 
         // Setup uart1
         let mut uart1: Uart1<pins::B7, pins::B6> =
@@ -161,7 +160,8 @@ mod app {
         defmt::info!("Radio Init Complete");
        
         // Setup AT command handler
-        let at_cmd_resp_inst = AtCmdResp::new();
+        let at_cmd_parser_inst = CommandParser::new();
+        let at_resp_gen_inst = ResponseGenerator::new();
         defmt::info!("AT Command Init Complete");
 
         // Grab device number. Unique for each individual device.
@@ -174,6 +174,7 @@ mod app {
         led_task::spawn().unwrap();
         usart1_rx_task::spawn().unwrap();
         mesh_stack_task::spawn().unwrap();
+        radio_health_task::spawn().unwrap();
 
         write_str_uart1(&mut uart1, "Enter Command: \n\r");
         defmt::info!("Startup Complete");        
@@ -183,7 +184,6 @@ mod app {
             {
                 uart1,
                 rtc,
-                at_cmd_resp_inst,
                 radio_inst,
                 mesh_inst,
             }, 
@@ -192,8 +192,9 @@ mod app {
                 ring_indicator: led1,
                 tx_indicator: led2,
                 rx_indicator: led3,
+                at_cmd_parser_inst,
+                at_resp_gen_inst,
                 received_cmd: None,
-                resp_value: AtCmdStr::new(),
                 buffer_available_to_parse: None,
                 outbound_buff_avail: false,
                 status: BmEngineStatus::default(),
@@ -237,7 +238,7 @@ mod app {
                     }
                 }
             });
-            Mono::delay(100.millis()).await;           
+            Mono::delay(100.millis()).await;
         }
     }
 
@@ -391,43 +392,40 @@ mod app {
     // language is very painful to deal with. Would have had to pass all struct instances into
     // at_command_handler.
     #[task(
-        shared = [uart1, rtc, at_cmd_resp_inst, radio_inst, mesh_inst],
-        local = [received_cmd, resp_value],
+        shared = [uart1, rtc, radio_inst, mesh_inst],
+        local = [at_cmd_parser_inst, at_resp_gen_inst, received_cmd],
         priority = 2,
     )]
     async fn usart1_rx_task(mut ctx: usart1_rx_task::Context) {
         loop {
             // Read byte and free up uart1 locks
-            (
-                &mut ctx.shared.uart1,
-                &mut ctx.shared.at_cmd_resp_inst,
-            ).lock(|uart1, at_cmd_resp_inst| {
+            ctx.shared.uart1.lock(|uart1| {
                 if let Ok(in_char) = uart1.read() {
-                    if let Some((rx_cmd_enum, print_help)) = at_cmd_resp_inst.handle_rx_char(in_char) {
+                    if let Some((rx_cmd_enum, print_help)) = ctx.local.at_cmd_parser_inst.handle_rx_char(in_char) {
                         defmt::info!("usart1_rx_task: cmd={}, help={}", rx_cmd_enum, print_help);
 
                         // Current mechanism to print help
                         if print_help {
                             defmt::info!("handle_command: print_help");
-                            write_slice_uart1(uart1, at_cmd_resp_inst.prepare_help_str(rx_cmd_enum));
+                            write_slice_uart1(uart1, ctx.local.at_resp_gen_inst.get_help_str(rx_cmd_enum));
                             return
                         }
                     
                         // Handle parsed AT commands
                         match rx_cmd_enum {                                   
-                            AtCommand::At => {
+                            AtCommandSet::At => {
                                 // Send generic AT response
                                 write_slice_uart1(uart1, 
-                                    at_cmd_resp_inst.prepare_response(rx_cmd_enum, "")
+                                    ctx.local.at_resp_gen_inst.fmt_resp_str_as_str_slice(rx_cmd_enum, "")
                                 );                       
                             }
-                            AtCommand::AtCsq => {
+                            AtCommandSet::AtCsq => {
                                 (
                                     &mut ctx.shared.radio_inst
                                 ).lock(|radio_inst| {
                                     // Send AT response with value
                                     write_slice_uart1(uart1, 
-                                        at_cmd_resp_inst.prepare_response(
+                                        ctx.local.at_resp_gen_inst.fmt_resp_str_as_str_slice(
                                             rx_cmd_enum, 
                                             // Query instantaneous rssi
                                             radio_inst.check_signal_strength().trim()
@@ -435,52 +433,50 @@ mod app {
                                     );
                                 });                            
                             }
-                            AtCommand::AtGmr => {
+                            AtCommandSet::AtGmr => {
                                 // Send ID response
                                 write_slice_uart1(uart1, 
-                                    at_cmd_resp_inst.prepare_response(
+                                    ctx.local.at_resp_gen_inst.fmt_resp_str_as_str_slice(
                                         rx_cmd_enum, 
                                         "1.0.0.0",
                                     )
                                 );
                             }
-                            AtCommand::AtId => {
+                            AtCommandSet::AtId => {
                                 (
                                     &mut ctx.shared.mesh_inst
-                                ).lock(|mesh_inst| {
-                                    // Convert u32 ID to String<>
-                                    let str_resp: String<10> = String::try_from(mesh_inst.table.get_local_network_id().unwrap()).unwrap();
-                        
+                                ).lock(|mesh_inst| {                        
                                     // Send ID response
                                     write_slice_uart1(uart1, 
-                                        at_cmd_resp_inst.prepare_response(
+                                        ctx.local.at_resp_gen_inst.fmt_resp_uint_as_str_slice(
                                             rx_cmd_enum, 
-                                            str_resp.trim(),
+                                            mesh_inst.table.get_local_network_id().unwrap(),
                                         )
                                     );
                                 });                            
                             }
-                            AtCommand::AtMsgReceiveCnt => {
-                                ctx.shared.mesh_inst.lock(|mesh_inst| {
-                                    // Convert usize count to String<>
-                                    let msg_cnt = mesh_inst.get_inbound_message_count() as u32;
-                                    let str_resp: String<10> = String::try_from(msg_cnt).unwrap();
-                        
-                                    defmt::info!("AtMsgReceiveCnt: cnt:{}", msg_cnt);
+                            AtCommandSet::AtMsgReceiveCnt => {
+                                ctx.shared.mesh_inst.lock(|mesh_inst| {                        
+                                    defmt::info!("AtMsgReceiveCnt: cnt:{}", mesh_inst.get_inbound_message_count() as u32);
 
                                     // Send msg count response
                                     write_slice_uart1(uart1, 
-                                        at_cmd_resp_inst.prepare_response(
+                                        ctx.local.at_resp_gen_inst.fmt_resp_uint_as_str_slice(
                                             rx_cmd_enum, 
-                                            str_resp.trim(),
+                                            mesh_inst.get_inbound_message_count() as u32,
                                         )
                                     );
                                 });
                             }
-                            AtCommand::AtMsgReceive => {
+                            AtCommandSet::AtMsgReceive => {
                                 ctx.shared.mesh_inst.lock(|mesh_inst| {
-                                    if let Some(in_msg) = mesh_inst.get_inbound_message() {
+                                    if let Some(mut in_msg) = mesh_inst.get_inbound_message() {
                                         defmt::info!("AtMsgReceive: in_msg:{}", defmt::Display2Format(&in_msg));
+
+                                        // Format packet at response
+                                        write_slice_uart1(uart1, 
+                                            ctx.local.at_resp_gen_inst.fmt_resp_packet_as_str_slice(&mut in_msg)
+                                        );
                                     }
                                     else {
                                         defmt::info!("AtMsgReceive: No msg available");
@@ -488,9 +484,10 @@ mod app {
                                     }
                                 });
                             }
-                            AtCommand::AtMsgSend => {
+                            AtCommandSet::AtMsgSend => {
                                 // Parse argument String buffer into tuple
-                                let msg_cmd: Option<MessageTuple> = at_cmd::cmd_arg_into_msg(at_cmd_resp_inst.get_cmd_arg());
+                                // TODO - consolodate cmd_arg_into_msg to at_cmd_parser_inst.into_msg()
+                                let msg_cmd: Option<MessageTuple> = parser::cmd_arg_into_msg(ctx.local.at_cmd_parser_inst.get_cmd_arg());
 
                                 if let Some((network_id, ack_required, ttl, payload)) = msg_cmd {
                                     defmt::info!("AtMsgSend: id:{} ack:{} ttl:{} payload_len:{}", 
@@ -498,7 +495,10 @@ mod app {
 
                                     // Load new packet into engine
                                     ctx.shared.mesh_inst.lock(|mesh_inst| {
-                                        mesh_inst.initiate_packet_transfer(network_id, ack_required, ttl, payload);
+                                        if mesh_inst.initiate_packet_transfer(network_id, ack_required, ttl, payload) != BmError::None {
+                                            defmt::error!("AtMsgSend: initiate_packet_transfer error");
+                                            write_str_uart1(uart1, "\n\rMesh Engine Error\n\r>");
+                                        }
                                     });
                     
                                     // Do not print Ok response here. Mesh engine state machine will drive UI responses 
@@ -508,13 +508,13 @@ mod app {
                                     write_str_uart1(uart1, "\n\rCmd Error\n\r>");
                                 }                           
                             }
-                            AtCommand::TestMessage => {
+                            AtCommandSet::TestMessage => {
                                 (
                                     &mut ctx.shared.radio_inst
                                 ).lock(|radio_inst| {
                                     // Send AT response
                                     write_slice_uart1(uart1, 
-                                        at_cmd_resp_inst.prepare_response(
+                                        ctx.local.at_resp_gen_inst.fmt_resp_str_as_str_slice(
                                             rx_cmd_enum, 
                                             // Tell radio to TX
                                             radio_inst.send_test_message().trim()
@@ -522,7 +522,7 @@ mod app {
                                     );
                                 });                            
                             }
-                            AtCommand::RoutingTable => {
+                            AtCommandSet::RoutingTable => {
                                 (
                                     &mut ctx.shared.mesh_inst,
                                 ).lock(|mesh_inst| {
@@ -530,12 +530,11 @@ mod app {
                                     // Note: May need to refactor this when we support more nodes.
                                     let num_nodes = mesh_inst.table.get_num_nodes();
                                     if num_nodes > 0 {
-                                        let mut output_str: String<100> = String::new();
                                         for node_idx in 0..num_nodes {
-                                            if let Some(node_data) = mesh_inst.table.get_node_by_idx(node_idx) {
-                                                // Write struct to String. Formatter is implemented in node file
-                                                write!(&mut output_str, "\n\r{}", node_data).unwrap();
-                                                write_str_uart1(uart1, output_str.as_str());
+                                            if let Some(node_data) = mesh_inst.table.get_node_by_idx(node_idx) {                                                
+                                                write_slice_uart1(uart1, 
+                                                    ctx.local.at_resp_gen_inst.fmt_resp_node_as_str_slice(node_data)
+                                                );
                                             }
                                         }
                                     }
@@ -545,35 +544,29 @@ mod app {
                                     write_str_uart1(uart1, "\n\rOk\n\r>");
                                 });
                             }
-                            AtCommand::RadioStatus => {
+                            AtCommandSet::RadioStatus => {
                                 (
                                     &mut ctx.shared.radio_inst
                                 ).lock(|radio_inst| {
                                     // Print radio status response
                                     write_slice_uart1(uart1, 
-                                        at_cmd_resp_inst.prepare_response(
+                                        ctx.local.at_resp_gen_inst.fmt_resp_str_as_str_slice(
                                             rx_cmd_enum, 
                                             radio_inst.get_status().trim()
                                         )
                                     );
                                 });
                             }                
-                            AtCommand::AtList => {
-                                // Get list of commands from at_command_handler
-                                let mut cmd_list: AtCmdStr = AtCmdStr::new();
-                                AtCommand::get_available_cmds(&mut cmd_list);
+                            AtCommandSet::AtList => {                                
                                 write_slice_uart1(uart1, 
-                                    at_cmd_resp_inst.prepare_response(
-                                        rx_cmd_enum, 
-                                        cmd_list.trim()
-                                    )
+                                    ctx.local.at_resp_gen_inst.get_available_cmds()
                                 );
                             }
-                            AtCommand::NewLine => {
+                            AtCommandSet::NewLine => {
                                 // Send character: >
                                 write_str_uart1(uart1, "\n\r>");
                             }
-                            AtCommand::Unknown => {
+                            AtCommandSet::Unknown => {
                                 write_str_uart1(uart1, "\n\rCmd Error\n\r>");
                             }
                             _ => {
@@ -591,17 +584,41 @@ mod app {
         }
     }
 
+    // Interrupt handler for internal radio irq
     // Note: RADIO_IRQ_BUSY doesnt work with DMA version of subghz...
     #[task(
         binds = RADIO_IRQ_BUSY,
-        shared = [radio_inst],
+        shared = [rtc, radio_inst],
         priority = 2,
     )]
-    fn radio_polling_task(mut ctx: radio_polling_task::Context)
+    fn radio_irq(mut ctx: radio_irq::Context)
     {
-        ctx.shared.radio_inst.lock(|radio_inst| {
-            radio_inst.locked_radio_irq_handler();
+        (
+            &mut ctx.shared.rtc,
+            &mut ctx.shared.radio_inst
+        ).lock(|rtc, radio_inst| {
+            let current_millis: i64 = unwrap!(rtc.date_time()).and_utc().timestamp_millis();
+            radio_inst.locked_radio_irq_handler(current_millis);
         });    
+    }
+
+    // Task to cover periodic maintenance of radio.
+    #[task(
+        shared = [rtc, radio_inst],
+        priority = 2,
+    )]
+    async fn radio_health_task(mut ctx: radio_health_task::Context) {
+        loop {
+            (
+                &mut ctx.shared.rtc,
+                &mut ctx.shared.radio_inst
+            ).lock(|rtc, radio_inst| {
+                let current_millis: i64 = unwrap!(rtc.date_time()).and_utc().timestamp_millis();
+                radio_inst.locked_radio_cycle_checks(current_millis);
+            });
+            
+            Mono::delay(100.millis()).await;           
+        }
     }
 }
 

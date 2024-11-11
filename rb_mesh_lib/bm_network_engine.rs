@@ -1,12 +1,12 @@
-use core::ops::Index;
+use heapless::Vec; use crate::BmError;
 
-use heapless::Vec; // fixed capacity `std::Vec`
+// fixed capacity `std::Vec`
 use super::{
-    bm_network_configs::*, bm_network_node::bm_network_node::BmNodeEntry, bm_network_packet::bm_network_packet::{
-        BmNetworkHdrInfo, BmNetworkPacket, BmNetworkPacketPayload, BmNetworkRoutingHdr, BmPacketTypes, TransmitState
+    bm_network_configs::*, bm_network_packet::bm_network_packet::{
+        BmNetworkPacket, BmNetworkPacketPayload, BmPacketTypes, TransmitState
     }, bm_network_routing_table::BmNetworkRoutingTable, NetworkId, RssiType, TimeType
 };
-use defmt::{write, unwrap};
+use defmt::write;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub enum BmEngineStatus {
@@ -71,7 +71,7 @@ impl BmNetworkEngine {
     pub fn process_packet(&mut self, length: usize, buffer: &mut [u8], millis: TimeType, rssi: RssiType) -> Option<BmNetworkPacket> {
         // Parse packet into struct
         // If we cannot successfully parse packet, return
-        let mut new_packet = BmNetworkPacket::from(length, buffer)?;
+        let mut new_packet = BmNetworkPacket::from(length, buffer)?.with_rssi(rssi);
 
         defmt::info!("process_packet len={}", length);
 
@@ -233,7 +233,9 @@ impl BmNetworkEngine {
         }
     }
 
-    pub fn initiate_packet_transfer(&mut self, dest: NetworkId, ack: bool, ttl: u8, payload: BmNetworkPacketPayload) {
+    pub fn initiate_packet_transfer(&mut self, dest: NetworkId, ack: bool, ttl: u8, payload: BmNetworkPacketPayload) -> BmError {
+        let mut return_value = BmError::None;
+
         if self.engine_status == BmEngineStatus::Idle {
             // Queue up data payload to send
             if self.outbound.push(
@@ -248,7 +250,7 @@ impl BmNetworkEngine {
                 ).with_wait_for_reply()
             ).is_err() {
                 defmt::error!("Error queue full");
-                return
+                return BmError::QueueFull
             }
 
             // Check stack if we have route
@@ -265,7 +267,10 @@ impl BmNetworkEngine {
         }
         else {
             defmt::warn!("initiate_packet_transfer: busy");
-        }            
+            return_value = BmError::Busy;
+        }
+
+        return_value       
     }
 
     pub fn get_inbound_message_count(&mut self) -> usize {
@@ -330,7 +335,7 @@ impl BmNetworkEngine {
                 // TODO - currently timeout includes tx time + rx time. Maybe change so timeout doesnt start until tx complete
                 if let Some(tx_comp_time) = self.outbound[self.working_outbound_index.unwrap()].tx_complete_timestamp {
                     if current_time_millis - tx_comp_time > 10000 {    
-                        defmt::info!("run_engine: WaitingForAck - timeout");
+                        defmt::info!("run_engine: WaitingForAck -> ErrorNoAck");
                         defmt::info!("current_time_millis={}", defmt::Display2Format(&current_time_millis));
                         defmt::info!("tx_complete_timestamp={}", defmt::Display2Format(&tx_comp_time));  
     
@@ -338,14 +343,8 @@ impl BmNetworkEngine {
                         self.table.set_node_error(
                             self.outbound[self.working_outbound_index.unwrap()].get_next_hop(), 
                             current_time_millis);
-                        
-                        // Check if tx count is below threshold
-                        if self.outbound[self.working_outbound_index.unwrap()].tx_count < BM_PACKET_RETRY_COUNT {
-                            self.engine_status = BmEngineStatus::RetryingPayload;
-                        }
-                        else {
-                            self.engine_status = BmEngineStatus::ErrorNoAck;
-                        }
+
+                        self.engine_status = BmEngineStatus::ErrorNoAck;
                     }
                 }                
             }
@@ -360,12 +359,17 @@ impl BmNetworkEngine {
                 self.engine_status = BmEngineStatus::Complete;
             }
             BmEngineStatus::ErrorNoAck => {
-                defmt::info!("run_engine: ErrorNoAck -> Complete");
+                // Check if tx count is below threshold
+                if self.outbound[self.working_outbound_index.unwrap()].tx_count < BM_PACKET_RETRY_COUNT {
+                    defmt::info!("run_engine: ErrorNoAck -> RetryingPayload");
 
-                // TODO -  add support for retransmits. Need to record error on that route and re-evaluate if there is a better route.
+                    self.engine_status = BmEngineStatus::RetryingPayload;
+                }
+                else {                    
+                    defmt::info!("run_engine: ErrorNoAck -> Complete");
 
-                self.engine_status = BmEngineStatus::Complete;
-
+                    self.engine_status = BmEngineStatus::Complete;
+                }
             }
             BmEngineStatus::Complete => {
                 // Wait for transmit to complete before erasing working packet

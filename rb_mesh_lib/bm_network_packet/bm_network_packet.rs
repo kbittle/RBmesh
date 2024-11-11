@@ -1,6 +1,8 @@
 use heapless::Vec;
 use bitfield_struct::bitfield;
-use crate::bm_network::{
+use crate::RssiType;
+
+use super::super::{
     NetworkId, 
     bm_network_configs::*,
 };
@@ -162,6 +164,7 @@ pub struct BmNetworkPacket {
     pub tx_complete_timestamp: Option<i64>,
     pub tx_count: u8,
     pub wait_for_reply: bool,
+    pub rx_rssi: RssiType,
 }
 
 impl fmt::Display for BmNetworkPacket {
@@ -190,6 +193,7 @@ impl BmNetworkPacket {
             tx_complete_timestamp: None,
             tx_count: 0,
             wait_for_reply: false,
+            rx_rssi: 0,
         }
     }
 
@@ -205,6 +209,11 @@ impl BmNetworkPacket {
 
     pub const fn with_wait_for_reply(mut self) -> Self {
         self.wait_for_reply = true;
+        self
+    }
+
+    pub const fn with_rssi(mut self, rssi: RssiType) -> Self {
+        self.rx_rssi = rssi;
         self
     }
 
@@ -243,6 +252,15 @@ impl BmNetworkPacket {
             self.routing_hdr.info.set_hop_count(hop_cnt + 1);
         }
         
+    }
+    pub fn get_payload_len(&mut self) -> usize {
+        if let Some(packet_payload) = &self.payload {
+            return packet_payload.len()
+        }
+        0
+    }
+    pub fn get_payload(&mut self) -> &Option<BmNetworkPacketPayload> {
+        &self.payload
     }
     pub fn set_ok_to_transmit(&mut self) {
         self.tx_state = TransmitState::Ok;
@@ -292,6 +310,7 @@ impl BmNetworkPacket {
                 tx_complete_timestamp: None,
                 tx_count: 0,
                 wait_for_reply: false,
+                rx_rssi: 0,
             }
         )
     }

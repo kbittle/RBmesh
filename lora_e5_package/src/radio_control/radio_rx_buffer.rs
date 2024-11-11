@@ -1,4 +1,4 @@
-use super::super::bm_network::RssiType;
+use bm_network::RssiType;
 
 pub const RADIO_MAX_BUFF_SIZE: usize = 255;
 
