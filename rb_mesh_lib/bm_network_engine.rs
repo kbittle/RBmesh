@@ -335,7 +335,7 @@ impl BmNetworkEngine {
                 // TODO - currently timeout includes tx time + rx time. Maybe change so timeout doesnt start until tx complete
                 if let Some(tx_comp_time) = self.outbound[self.working_outbound_index.unwrap()].tx_complete_timestamp {
                     if current_time_millis - tx_comp_time > 10000 {    
-                        defmt::info!("run_engine: WaitingForAck - timeout");
+                        defmt::info!("run_engine: WaitingForAck -> ErrorNoAck");
                         defmt::info!("current_time_millis={}", defmt::Display2Format(&current_time_millis));
                         defmt::info!("tx_complete_timestamp={}", defmt::Display2Format(&tx_comp_time));  
     
@@ -343,14 +343,8 @@ impl BmNetworkEngine {
                         self.table.set_node_error(
                             self.outbound[self.working_outbound_index.unwrap()].get_next_hop(), 
                             current_time_millis);
-                        
-                        // Check if tx count is below threshold
-                        if self.outbound[self.working_outbound_index.unwrap()].tx_count < BM_PACKET_RETRY_COUNT {
-                            self.engine_status = BmEngineStatus::RetryingPayload;
-                        }
-                        else {
-                            self.engine_status = BmEngineStatus::ErrorNoAck;
-                        }
+
+                        self.engine_status = BmEngineStatus::ErrorNoAck;
                     }
                 }                
             }
@@ -365,12 +359,17 @@ impl BmNetworkEngine {
                 self.engine_status = BmEngineStatus::Complete;
             }
             BmEngineStatus::ErrorNoAck => {
-                defmt::info!("run_engine: ErrorNoAck -> Complete");
+                // Check if tx count is below threshold
+                if self.outbound[self.working_outbound_index.unwrap()].tx_count < BM_PACKET_RETRY_COUNT {
+                    defmt::info!("run_engine: ErrorNoAck -> RetryingPayload");
 
-                // TODO -  add support for retransmits. Need to record error on that route and re-evaluate if there is a better route.
+                    self.engine_status = BmEngineStatus::RetryingPayload;
+                }
+                else {                    
+                    defmt::info!("run_engine: ErrorNoAck -> Complete");
 
-                self.engine_status = BmEngineStatus::Complete;
-
+                    self.engine_status = BmEngineStatus::Complete;
+                }
             }
             BmEngineStatus::Complete => {
                 // Wait for transmit to complete before erasing working packet
