@@ -503,3 +503,83 @@ impl BmNetworkEngine {
     }
     
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Satisfy defmt linker symbol for host unit tests
+    #[no_mangle]
+    fn _defmt_timestamp() -> u64 {
+        0
+    }
+
+    #[test]
+    fn test_engine_initialization() {
+        // Initialize engine with random network id 
+        let mut bm_engine = BmNetworkEngine::new(Some(5));
+        
+        // Initial state should be Idle and outbound/inbound buffers empty
+        assert_eq!(bm_engine.get_next_outbound_packet(), None);
+        assert_eq!(bm_engine.get_inbound_message_count(), 0);
+        assert_eq!(bm_engine.run_engine(0), BmEngineStatus::Idle);
+    }
+
+    #[test]
+    fn test_initiate_packet_transfer_without_route_triggers_discovery() {
+        let mut bm_engine = BmNetworkEngine::new(Some(1));
+        let dest_id = Some(2);
+        let payload = BmNetworkPacketPayload::default();
+
+        // Initiating transfer to an unknown route should start network discovery
+        let err = bm_engine.initiate_packet_transfer(dest_id, true, 5, payload);
+        assert_eq!(err, BmError::None);
+
+        // State machine should transition to PerformingNetworkDiscovery
+        assert_eq!(bm_engine.run_engine(0), BmEngineStatus::PerformingNetworkDiscovery);
+
+        // A Route Discovery Request packet should be generated and ready for transmit
+        let next_pkt = bm_engine.get_next_outbound_packet();
+        assert!(next_pkt.is_some());
+        
+        let pkt = next_pkt.unwrap();
+        assert_eq!(pkt.packet_type, BmPacketTypes::RouteDiscoveryRequest);
+        assert_eq!(pkt.get_destination(), dest_id);
+    }
+
+    #[test]
+    fn test_busy_when_initiating_transfer_twice() {
+        let mut bm_engine = BmNetworkEngine::new(Some(1));
+        let payload = BmNetworkPacketPayload::default();
+
+        // First transfer succeeds
+        let err1 = bm_engine.initiate_packet_transfer(Some(2), true, 5, payload.clone());
+        assert_eq!(err1, BmError::None);
+
+        // Second transfer while engine is active should return Busy
+        let err2 = bm_engine.initiate_packet_transfer(Some(3), true, 5, payload);
+        assert_eq!(err2, BmError::Busy);
+    }
+
+    #[test]
+    fn test_network_discovery_timeout() {
+        let mut bm_engine = BmNetworkEngine::new(Some(1));
+        let payload = BmNetworkPacketPayload::default();
+
+        // Initiate transfer
+        let _ = bm_engine.initiate_packet_transfer(Some(2), true, 5, payload);
+        bm_engine.run_engine(0); // Transition into PerformingNetworkDiscovery
+
+        // Simulate transmit finishing at t = 1000ms
+        bm_engine.set_next_outbound_complete(1000);
+
+        // Check state before timeout threshold (< 10000ms elapsed)
+        assert_eq!(bm_engine.run_engine(5000), BmEngineStatus::PerformingNetworkDiscovery);
+
+        // Check state after timeout (> 10000ms elapsed: 1000 + 10001 = 11001ms)
+        assert_eq!(bm_engine.run_engine(11001), BmEngineStatus::PerformingNetworkDiscovery);
+        
+        // Next engine iteration should reflect ErrorNoRoute transition
+        assert_eq!(bm_engine.run_engine(11002), BmEngineStatus::ErrorNoRoute);
+    }
+}

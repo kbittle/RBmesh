@@ -17,12 +17,25 @@ I used custom PCB for this development but the "Wio-E5 mini Dev Board" should wo
 - Add periodic neighbor table transmits. Might want to TX subset/only 3 entries. Maybe one every 10min?
 - Add some sort of randomized delay for transmitting. What happens when 3 nodes want to relay a packet? Adding a delay will help stagger packets and theoretically the other nodes will detect TX preambles and block.
 
+## Environment Setup:
+
+### Setup in WSL:
+
+If you’re a Windows Subsystem for Linux user run the following in your terminal, then follow the on-screen instructions to install Rust.
+
+`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+`. "$HOME/.cargo/env"`
+
+Download the target with:
+
+`rustup target add thumbv7m-none-eabi`
+
 ## Build/Run/Test Commands:
 General rust/cargo command to initialize project space:<br />
-`Cargo init RBmesh`
+`cargo init RBmesh`
 
 General rust/cargo command to build application:<br />
-`Cargo build --release`
+`cargo build --release`
 
 Command to load code on platform: **requires probe-rs**<br />
 `cargo flash --release --chip STM32WLE5JC`
@@ -30,19 +43,18 @@ Command to load code on platform: **requires probe-rs**<br />
 Command to load and debug code on platform: **requires probe-rs**<br />
 `cargo embed --release`
 
-## Unit Test Progress:
-General rust/cargo command to run tests: **(have not added tests yet)**<br />
-`cargo test --features stm32wle5`
+## Unit Test:
 
-Dont think I will be able to get this to work. Code is targetted for stm32wl, which doesnt support "test".
+Command to call test code that runs on build machine. This will exercise the network stack code.
+
+`cargo test -p bm_network --target x86_64-unknown-linux-gnu`
+
+You cannot just call `cargo test`. I think it has to do with the target being ARM and not supporting std lib.
 https://github.com/rust-lang/cargo/issues/6784
 
-Steps needed to test rb_mesh_lib:
-- Remove .cargo/config.toml
-- cd to ..\rb_mesh_lib\
-- Remove `#![no_std]` from lib.rs
-- Remove/config out usage of defmt library.
-- Run cmd: cargo test --target=x86_64-pc-windows-msvc
+Command to print verbose println's while running test:
+
+`cargo test -p bm_network --target x86_64-unknown-linux-gnu -- --nocapture`
 
 ## Usefull links:
 https://jonathanklimt.de/electronics/programming/embedded-rust/rust-on-stm32-2/
