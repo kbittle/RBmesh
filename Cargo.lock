@@ -79,7 +79,6 @@ dependencies = [
  "bitfield-struct",
  "critical-section",
  "defmt",
- "defmt-rtt",
  "heapless",
 ]
 
