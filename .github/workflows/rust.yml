@@ -2,9 +2,9 @@ name: Rust CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "dev" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "dev" ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,14 +16,13 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Build
+
+    - name: Set up Rust & Targets
       run: |
-       echo "Removing MSVC toolchain file..."
-       rm rust-toolchain.toml
-       echo "Adding target compiler..."
-       rustup target add thumbv7m-none-eabi
-       rustup default stable-x86_64-unknown-linux-gnu
-       cargo build --release --target=thumbv7m-none-eabi
-# TODO - figure out unit tests
-#    - name: Run tests
-#      run: cargo test --verbose
+        rustup target add thumbv7m-none-eabi
+
+    - name: Build
+      run: cargo build --release --target=thumbv7m-none-eabi
+
+    - name: Unit-Test
+      run: cargo test -p bm_network --target x86_64-unknown-linux-gnu -- --nocapture
