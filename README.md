@@ -1,5 +1,10 @@
 # RB Mesh
-![Build](https://github.com/kbittle/RBmesh/actions/workflows/rust.yml/badge.svg)
+
+<!-- Build Status Badge -->
+![Build Status](https://github.com/kbittle/RBmesh/actions/workflows/rust.yml/badge.svg?job=build)
+
+<!-- Test Status Badge -->
+![Test Status](https://github.com/kbittle/RBmesh/actions/workflows/rust.yml/badge.svg?job=test)
 
 A mesh stack written in rust to run on the STM32WL / LoRa-E5 module. Like the LoRaWAN modem software Seed Studio provides with the hardware. This software package will also support a AT command set to interact with the modem. This mesh stack is self forming and self healing. If nodes are mobile, a link is formed and then broken, the mesh is smart enough record a failure and find a better route. Simply point your payload to a node address and all decisions happen under the hood. This software package will also supply GPIO support for radio TX/RX and incoming message ring indication.
 
@@ -24,6 +29,7 @@ I used custom PCB for this development but the "Wio-E5 mini Dev Board" should wo
 If you’re a Windows Subsystem for Linux user run the following in your terminal, then follow the on-screen instructions to install Rust.
 
 `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+
 `. "$HOME/.cargo/env"`
 
 Download the target with:

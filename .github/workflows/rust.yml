@@ -11,19 +11,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  cross_compile:
-
+  build:
+    name: Embedded Build
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Rust & Targets
-      run: |
-        rustup target add thumbv7m-none-eabi
+      - name: Set up Rust & Target
+        run: rustup target add thumbv7m-none-eabi
 
-    - name: Build
-      run: cargo build --release --target=thumbv7m-none-eabi
+      - name: Build Crate
+        run: cargo build --release --target=thumbv7m-none-eabi
 
-    - name: Unit-Test
-      run: cargo test -p bm_network --target x86_64-unknown-linux-gnu -- --nocapture
+  test:
+    name: Host Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Unit Tests
+        run: cargo test -p bm_network --target x86_64-unknown-linux-gnu -- --nocapture
+        
