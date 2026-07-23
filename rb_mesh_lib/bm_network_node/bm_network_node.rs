@@ -1,4 +1,3 @@
-use defmt_rtt as _; // global logger
 use heapless::Vec; // fixed capacity `std::Vec`
 use super::super::{
     NetworkId, RssiType, TimeType,

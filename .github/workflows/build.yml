@@ -1,0 +1,23 @@
+name: CI Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "dev" ]
+  pull_request:
+    branches: [ "main", "dev" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cross_compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust & Target
+        run: rustup target add thumbv7m-none-eabi
+
+      - name: Build Crate
+        run: cargo build --release --target=thumbv7m-none-eabi

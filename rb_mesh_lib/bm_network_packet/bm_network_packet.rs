@@ -339,3 +339,142 @@ impl BmNetworkPacket {
         Some(out_buffer)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_packet_type_conversions() {
+        assert_eq!(BmPacketTypes::from_bits(0), BmPacketTypes::BcastNeighborTable);
+        assert_eq!(BmPacketTypes::from_bits(10), BmPacketTypes::RouteDiscoveryRequest);
+        assert_eq!(BmPacketTypes::from_bits(11), BmPacketTypes::RouteDiscoveryResponse);
+        assert_eq!(BmPacketTypes::from_bits(12), BmPacketTypes::RouteDiscoveryError);
+        assert_eq!(BmPacketTypes::from_bits(20), BmPacketTypes::DataPayload);
+        assert_eq!(BmPacketTypes::from_bits(21), BmPacketTypes::DataPayloadAck);
+        // Fallback for unknown bit patterns
+        assert_eq!(BmPacketTypes::from_bits(99), BmPacketTypes::BcastNeighborTable);
+    }
+
+    #[test]
+    fn test_header_info_bitfields() {
+        let mut info = BmNetworkHdrInfo::new()
+            .with_ttl(5)
+            .with_hop_count(2)
+            .with_required_ack(true)
+            .with_encrypted(false);
+
+        assert_eq!(info.ttl(), 5);
+        assert_eq!(info.hop_count(), 2);
+        assert!(info.required_ack());
+        assert!(!info.encrypted());
+
+        info.set_hop_count(3);
+        assert_eq!(info.hop_count(), 3);
+    }
+
+    #[test]
+    fn test_packet_construction_and_builders() {
+        let orig = Some(10);
+        let next_hop = Some(20);
+        let dest = Some(30);
+
+        let mut pkt = BmNetworkPacket::new(
+            BmPacketTypes::DataPayload,
+            orig,
+            next_hop,
+            dest,
+            5,
+            true,
+            None,
+        )
+        .with_ok_to_transmit()
+        .with_wait_for_reply()
+        .with_rssi(-75);
+
+        assert_eq!(pkt.packet_type, BmPacketTypes::DataPayload);
+        assert_eq!(pkt.get_originator(), orig);
+        assert_eq!(pkt.get_source(), orig);
+        assert_eq!(pkt.get_next_hop(), next_hop);
+        assert_eq!(pkt.get_destination(), dest);
+        assert_eq!(pkt.rx_rssi, -75);
+        assert!(pkt.is_ok_to_transmit());
+        assert!(pkt.is_waiting_for_reply());
+        assert_eq!(pkt.get_info().ttl(), 5);
+        assert!(pkt.get_info().required_ack());
+    }
+
+    #[test]
+    fn test_hop_count_increment_max_limit() {
+        let mut pkt = BmNetworkPacket::new(
+            BmPacketTypes::DataPayload,
+            Some(1),
+            Some(2),
+            Some(3),
+            7,
+            false,
+            None,
+        );
+
+        assert_eq!(pkt.get_hop_count(), 0);
+
+        // Increment up to MAX_TTL_HOP_CNT (7)
+        for i in 1..=7 {
+            pkt.increment_hop_count();
+            assert_eq!(pkt.get_hop_count(), i);
+        }
+
+        // Attempting to exceed max should keep it capped at 7
+        pkt.increment_hop_count();
+        assert_eq!(pkt.get_hop_count(), 7);
+    }
+
+    #[test]
+    fn test_serialization_and_deserialization_roundtrip() {
+        let orig = Some(0x11223344);
+        let next_hop = Some(0x55667788);
+        let dest = Some(0x99AABBCC);
+        let src = Some(0x11223344);
+
+        let mut payload: BmNetworkPacketPayload = Vec::new();
+        payload.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
+
+        let mut original_pkt = BmNetworkPacket::new(
+            BmPacketTypes::DataPayload,
+            orig,
+            next_hop,
+            dest,
+            5,
+            true,
+            Some(payload.clone()),
+        );
+
+        // Serialize to bytes (OTA format)
+        let mut bytes = original_pkt.to_bytes().expect("Serialization failed");
+        assert!(bytes.len() >= BM_PACKET_HDR_SIZE);
+
+        // Deserialize from buffer
+        let len = bytes.len();
+        let parsed_pkt = BmNetworkPacket::from(len, &mut bytes).expect("Deserialization failed");
+
+        assert_eq!(parsed_pkt.packet_type, BmPacketTypes::DataPayload);
+        assert_eq!(parsed_pkt.routing_hdr.dest, dest);
+        assert_eq!(parsed_pkt.routing_hdr.src, src);
+        assert_eq!(parsed_pkt.routing_hdr.next_hop, next_hop);
+        assert_eq!(parsed_pkt.routing_hdr.orig, orig);
+
+        // Verify Header Info bits survived roundtrip
+        assert_eq!(parsed_pkt.routing_hdr.info.ttl(), 5);
+        assert!(parsed_pkt.routing_hdr.info.required_ack());
+
+        // Verify Payload survived roundtrip
+        assert_eq!(parsed_pkt.payload, Some(payload));
+    }
+
+    #[test]
+    fn test_from_bytes_buffer_too_small() {
+        let mut short_buffer = [0u8; 5]; // Smaller than BM_PACKET_HDR_SIZE
+        let parsed = BmNetworkPacket::from(short_buffer.len(), &mut short_buffer);
+        assert!(parsed.is_none());
+    }
+}
