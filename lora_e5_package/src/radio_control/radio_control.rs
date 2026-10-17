@@ -241,6 +241,131 @@ impl RadioControl {
         output_str       
     }
 
+    pub fn get_frequency(&mut self) -> String<100> {
+        let mut output_str: String<100> = String::new();
+        write!(&mut output_str, "{}", self.config.frequency.freq()).unwrap();
+        output_str
+    }
+
+    pub fn set_frequency(&mut self, freq_hz: u32) -> Result<String<100>, &str> {
+        if !(150_000_000..=960_000_000).contains(&freq_hz) {
+            return Err("Frequency out of range (150-960 MHz)");
+        }
+        self.config.frequency = RfFreq::from_frequency(freq_hz);
+        unwrap!(self.radio.set_standby(StandbyClk::Rc));
+        unwrap!(self.radio.set_rf_frequency(&self.config.frequency));
+        unwrap!(self.radio.set_standby(StandbyClk::Hse));
+        Ok(self.get_frequency())
+    }
+
+    pub fn get_tx_power(&mut self) -> String<100> {
+        let mut output_str: String<100> = String::new();
+        let pa = &self.config.pa_cfg;
+        let hp_max = pa.as_slice()[2];
+        let power_dbm = match hp_max {
+            0x7 => 22,
+            0x5 => 20,
+            0x3 => 17,
+            0x2 => 14,
+            _ => 0,
+        };
+        write!(&mut output_str, "{}", power_dbm).unwrap();
+        output_str
+    }
+
+    pub fn set_tx_power(&mut self, power_dbm: u32) -> Result<String<100>, &str> {
+        let (pa_cfg, tx_params) = match power_dbm {
+            22 => (PaConfig::HP_22, TxParams::HP),
+            20 => (PaConfig::HP_20, TxParams::HP),
+            17 => (PaConfig::HP_17, TxParams::HP),
+            14 => (PaConfig::HP_14, TxParams::HP),
+            _ => return Err("Supported power levels: 14, 17, 20, 22 dBm"),
+        };
+        self.config.pa_cfg = pa_cfg;
+        self.config.tx_params = tx_params;
+        unwrap!(self.radio.set_standby(StandbyClk::Rc));
+        unwrap!(self.radio.set_pa_config(&self.config.pa_cfg));
+        unwrap!(self.radio.set_tx_params(&self.config.tx_params));
+        unwrap!(self.radio.set_standby(StandbyClk::Hse));
+        Ok(self.get_tx_power())
+    }
+
+    pub fn get_version(&mut self) -> String<100> {
+        String::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| String::try_from("unknown").unwrap())
+    }
+
+    pub fn get_bandwidth(&mut self) -> String<100> {
+        let mut output_str: String<100> = String::new();
+        let bw_val = self.config.mod_params.as_slice()[2];
+        let bw_khz = match bw_val {
+            0x00 => 7,   // Bw7
+            0x08 => 10,  // Bw10
+            0x01 => 15,  // Bw15
+            0x09 => 20,  // Bw20
+            0x02 => 31,  // Bw31
+            0x0A => 41,  // Bw41
+            0x03 => 62,  // Bw62
+            0x04 => 125, // Bw125
+            0x05 => 250, // Bw250
+            0x06 => 500, // Bw500
+            _ => 125,
+        };
+        write!(&mut output_str, "{}", bw_khz).unwrap();
+        output_str
+    }
+
+    pub fn set_bandwidth(&mut self, bw_khz: u32) -> Result<String<100>, &str> {
+        let bw = match bw_khz {
+            7 => LoRaBandwidth::Bw7,
+            10 => LoRaBandwidth::Bw10,
+            15 => LoRaBandwidth::Bw15,
+            20 => LoRaBandwidth::Bw20,
+            31 => LoRaBandwidth::Bw31,
+            41 => LoRaBandwidth::Bw41,
+            62 => LoRaBandwidth::Bw62,
+            125 => LoRaBandwidth::Bw125,
+            250 => LoRaBandwidth::Bw250,
+            500 => LoRaBandwidth::Bw500,
+            _ => return Err("Supported BW: 7, 10, 15, 20, 31, 41, 62, 125, 250, 500 kHz"),
+        };
+        self.config.mod_params = self.config.mod_params.set_bw(bw);
+        unwrap!(self.radio.set_standby(StandbyClk::Rc));
+        unwrap!(self.radio.set_lora_mod_params(&self.config.mod_params));
+        unwrap!(self.radio.set_standby(StandbyClk::Hse));
+        Ok(self.get_bandwidth())
+    }
+
+    pub fn get_coding_rate(&mut self) -> String<100> {
+        let mut output_str: String<100> = String::new();
+        let cr_val = self.config.mod_params.as_slice()[3];
+        let cr_denom = match cr_val {
+            0x00 => 4, // Cr44
+            0x01 => 5, // Cr45
+            0x02 => 6, // Cr46
+            0x03 => 7, // Cr47
+            0x04 => 8, // Cr48
+            _ => 5,
+        };
+        write!(&mut output_str, "4/{}", cr_denom).unwrap();
+        output_str
+    }
+
+    pub fn set_coding_rate(&mut self, cr_denom: u32) -> Result<String<100>, &str> {
+        let cr = match cr_denom {
+            4 => CodingRate::Cr44,
+            5 => CodingRate::Cr45,
+            6 => CodingRate::Cr46,
+            7 => CodingRate::Cr47,
+            8 => CodingRate::Cr48,
+            _ => return Err("Supported CR: 4/4, 4/5, 4/6, 4/7, 4/8 (use denominator 4-8)"),
+        };
+        self.config.mod_params = self.config.mod_params.set_cr(cr);
+        unwrap!(self.radio.set_standby(StandbyClk::Rc));
+        unwrap!(self.radio.set_lora_mod_params(&self.config.mod_params));
+        unwrap!(self.radio.set_standby(StandbyClk::Hse));
+        Ok(self.get_coding_rate())
+    }
+
     // Radio interrupt handler
     pub fn locked_radio_irq_handler(&mut self, millis: TimeType) -> RadioState
     {

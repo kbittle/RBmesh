@@ -135,6 +135,23 @@ impl CommandParser {
         None
     }
 
+    pub fn into_msg(&mut self) -> Option<MessageTuple> {
+        let args: Vec<&str, 5> = self.argument_buffer.split(',').collect();
+        
+        if args.len() == 4 {
+            let network_id = Some(args[0].parse().unwrap());
+            let ack_required = args[1] == "true";
+            let ttl = args[2].parse().unwrap();
+            let mut payload: BmNetworkPacketPayload = Vec::new();
+            unwrap!(payload.extend_from_slice(args[3].as_bytes()));
+            return Some((network_id, ack_required, ttl, payload))
+        }
+        else {
+            defmt::error!("into_msg: invalid args len={}", args.len());
+        }
+        None
+    }
+
     //-----------------------------------------------------------
     // Private functions
     //-----------------------------------------------------------    
@@ -143,23 +160,3 @@ impl CommandParser {
 
 pub type MessageTuple = (NetworkId, bool, u8, BmNetworkPacketPayload);
 
-// Function to parse AT Cmd string into tuple of types used for packet.
-pub fn cmd_arg_into_msg(argument_buffer: AtCmdStr) -> Option<MessageTuple> {
-    // Expected format in the argument buffer: "dest,ack,ttl,ascii payload"
-    let args: Vec<&str, 5> = argument_buffer.split(',').collect();
-    
-    if args.len() == 4 {
-        // Create 3 types expected in the return
-        let network_id = Some(args[0].parse().unwrap());
-        let ack_required = args[1] == "true";
-        let ttl = args[2].parse().unwrap();
-        let mut payload: BmNetworkPacketPayload = Vec::new();
-        unwrap!(payload.extend_from_slice(args[3].as_bytes()));
-        // Combine all types into a tuple
-        return Some((network_id, ack_required, ttl, payload))
-    }
-    else {
-        defmt::error!("cmd_arg_into_msg: invalid args len={}", args.len());
-    }
-    None
-}

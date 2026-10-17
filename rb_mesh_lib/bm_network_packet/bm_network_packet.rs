@@ -13,8 +13,18 @@ pub type BmNetworkOtaPacket = Vec<u8, BM_MAX_OTA_SIZE>;
 // Vec type with just the size3 of the payload
 pub type BmNetworkPacketPayload = Vec<u8, BM_MAX_PAYLOAD_SIZE>;
 
-// Max TTL and hop count value
-const MAX_TTL_HOP_CNT: u8 = 7;
+// Max TTL and hop count value (3 bits in bitfield)
+pub const MAX_TTL_HOP_CNT: u8 = 7;
+
+/// Clamps TTL to valid range (0-7) and logs warning if out of bounds
+fn clamp_ttl(ttl: u8) -> u8 {
+    if ttl > MAX_TTL_HOP_CNT {
+        defmt::warn!("TTL {} exceeds max {}, clamping", ttl, MAX_TTL_HOP_CNT);
+        MAX_TTL_HOP_CNT
+    } else {
+        ttl
+    }
+}
 
 #[repr(u8)]
 #[derive(Default, Clone, Debug, PartialEq)]
@@ -181,6 +191,7 @@ impl fmt::Display for BmNetworkPacket {
 impl BmNetworkPacket {
     // Constructor
     pub fn new(new_packet_type: BmPacketTypes, orig: NetworkId, next_hop: NetworkId, dest: NetworkId, ttl: u8, ack: bool, new_payload: Option<BmNetworkPacketPayload>) -> Self {
+        let ttl = clamp_ttl(ttl);
         BmNetworkPacket {
             packet_type: new_packet_type,
             routing_hdr: BmNetworkRoutingHdr::new(ttl, ack)
@@ -252,6 +263,11 @@ impl BmNetworkPacket {
             self.routing_hdr.info.set_hop_count(hop_cnt + 1);
         }
         
+    }
+
+    #[cfg(test)]
+    pub fn set_hop_count(&mut self, hop_count: u8) {
+        self.routing_hdr.info.set_hop_count(hop_count);
     }
     pub fn get_payload_len(&mut self) -> usize {
         if let Some(packet_payload) = &self.payload {
@@ -326,10 +342,10 @@ impl BmNetworkPacket {
         if out_buffer.extend_from_slice(&self.routing_hdr.orig.unwrap_or(0).to_ne_bytes()).is_err() { return None; }
         if out_buffer.push(self.routing_hdr.info.into()).is_err() { return None; }
 
-        // If there is a payload, oush bytes
+        // If there is a payload, push bytes
         if let Some(payload) = self.payload.as_ref() {        
-            for &payload_byte in payload.iter() {
-                out_buffer.push(payload_byte).unwrap();
+            if out_buffer.extend_from_slice(payload).is_err() {
+                return None;
             }
         }
 

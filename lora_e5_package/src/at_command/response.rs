@@ -112,8 +112,48 @@ impl ResponseGenerator {
     }
 
     pub fn fmt_resp_node_as_str_slice(&mut self, node_data: &BmNodeEntry) -> &[u8] {
-        // Write struct to String. Formatter is implemented in node file
-        self.resp_buffer.write_fmt(format_args!("\n\r{}", node_data)).unwrap();
+        self.resp_buffer.clear();
+        let id = node_data.dest_id.unwrap_or(0);
+        let route_count = node_data.routes().len();
+        
+        if let Some(primary_idx) = node_data.primary_route_idx() {
+            if let Some(route) = node_data.routes().nth(primary_idx) {
+                self.resp_buffer.write_fmt(format_args!(
+                    "\n\rId: {}, Next: {}, Dist: {}, RSSI: {}, Routes: {}",
+                    id,
+                    route.next_hop().unwrap_or(0),
+                    route.distance(),
+                    route.avg_rssi(),
+                    route_count
+                )).unwrap();
+                return self.resp_buffer.as_bytes();
+            }
+        }
+        
+        self.resp_buffer.write_fmt(format_args!("\n\rId: {}, Routes: {}", id, route_count)).unwrap();
+        self.resp_buffer.as_bytes()
+    }
+
+    pub fn fmt_resp_peer_as_str_slice(&mut self, node_data: &BmNodeEntry) -> &[u8] {
+        self.resp_buffer.clear();
+        let id = node_data.dest_id.unwrap_or(0);
+        self.resp_buffer.write_fmt(format_args!("\n\rPeer: {}", id)).unwrap();
+        
+        let primary_idx = node_data.primary_route_idx();
+        for (i, route) in node_data.routes().enumerate() {
+            let is_primary = primary_idx == Some(i);
+            let primary_str = if is_primary { " *" } else { "" };
+            self.resp_buffer.write_fmt(format_args!(
+                "\n\r  Route{}: next_hop={}, dist={}, avg_rssi={}, samples={}, fails={}",
+                primary_str,
+                route.next_hop().unwrap_or(0),
+                route.distance(),
+                route.avg_rssi(),
+                route.rssi_samples_len(),
+                route.failures()
+            )).unwrap();
+        }
+        
         self.resp_buffer.as_bytes()
     }
 

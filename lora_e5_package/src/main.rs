@@ -31,7 +31,6 @@ mod at_command;
 use at_command::{
     command_set::{
         AtCommandSet,
-        AtCmdStr,
     },
     parser::{CommandParser, MessageTuple},    
 };
@@ -46,7 +45,7 @@ systick_monotonic!(Mono, 1000);
 
 #[app(device = stm32wlxx_hal::pac, peripherals = true, dispatchers = [USART1])]
 mod app {
-    use at_command::{parser, response::ResponseGenerator};
+    use at_command::{response::ResponseGenerator};
     use bm_network::BmError;
 
     use super::*;
@@ -66,6 +65,8 @@ mod app {
         ring_indicator: Output<pins::C0>,
         tx_indicator: Output<pins::C1>,
         rx_indicator: Output<pins::B5>,
+        tx_led_timer: u32,
+        rx_led_timer: u32,
 
         // At Cmd task
         at_cmd_parser_inst: CommandParser,
@@ -136,9 +137,9 @@ mod app {
         let mut led1: Output<pins::C0> = Output::default(gpioc.c0, cs);
         let mut led2: Output<pins::C1> = Output::default(gpioc.c1, cs);
         let mut led3: Output<pins::B5> = Output::default(gpiob.b5, cs);
-        led1.set_level(PinState::High);        
-        led2.set_level(PinState::High);
-        led3.set_level(PinState::High);
+        led1.set_level(PinState::Low);        
+        led2.set_level(PinState::Low);
+        led3.set_level(PinState::Low);
 
         // Setup uart1
         let mut uart1: Uart1<pins::B7, pins::B6> =
@@ -192,6 +193,8 @@ mod app {
                 ring_indicator: led1,
                 tx_indicator: led2,
                 rx_indicator: led3,
+                tx_led_timer: 0,
+                rx_led_timer: 0,
                 at_cmd_parser_inst,
                 at_resp_gen_inst,
                 received_cmd: None,
@@ -205,13 +208,15 @@ mod app {
     // LED task will poll all other instances for data needed to iluminate the LED's
     #[task(
         shared = [radio_inst, mesh_inst],
-        local = [ring_indicator, tx_indicator, rx_indicator],
+        local = [ring_indicator, tx_indicator, rx_indicator, tx_led_timer, rx_led_timer],
         priority = 2,
     )]
     async fn led_task(mut ctx: led_task::Context) {
+        const LED_MIN_BLINK_MS: u32 = 100;
+        const POLL_INTERVAL_MS: u32 = 20;
+        
         loop {
             ctx.shared.mesh_inst.lock(|mesh_inst| {
-                // Illuminate ring indicator when there is a message waiting for us
                 let msg_cnt = mesh_inst.get_inbound_message_count() as u32;
                 if msg_cnt > 0 {
                     ctx.local.ring_indicator.set_level_high();
@@ -222,23 +227,32 @@ mod app {
             });
 
             ctx.shared.radio_inst.lock(|radio_inst| {
-                // poll radio inst for tx/rx state
-                // TODO - this may not work as we are only checking every 100ms
-                //   and it could be blocked by IRQ handler??
                 match radio_inst.current_state {
                     RadioState::Transmitting => {
                         ctx.local.tx_indicator.set_level_high();
+                        *ctx.local.tx_led_timer = LED_MIN_BLINK_MS;
                     }
                     RadioState::Receiving => {
                         ctx.local.rx_indicator.set_level_high();
+                        *ctx.local.rx_led_timer = LED_MIN_BLINK_MS;
                     }                    
                     _ => {
-                        ctx.local.tx_indicator.set_level_low();
-                        ctx.local.rx_indicator.set_level_low();
+                        if *ctx.local.tx_led_timer > 0 {
+                            *ctx.local.tx_led_timer = ctx.local.tx_led_timer.saturating_sub(POLL_INTERVAL_MS);
+                            if *ctx.local.tx_led_timer == 0 {
+                                ctx.local.tx_indicator.set_level_low();
+                            }
+                        }
+                        if *ctx.local.rx_led_timer > 0 {
+                            *ctx.local.rx_led_timer = ctx.local.rx_led_timer.saturating_sub(POLL_INTERVAL_MS);
+                            if *ctx.local.rx_led_timer == 0 {
+                                ctx.local.rx_indicator.set_level_low();
+                            }
+                        }
                     }
                 }
             });
-            Mono::delay(100.millis()).await;
+            Mono::delay(POLL_INTERVAL_MS.millis()).await;
         }
     }
 
@@ -485,9 +499,7 @@ mod app {
                                 });
                             }
                             AtCommandSet::AtMsgSend => {
-                                // Parse argument String buffer into tuple
-                                // TODO - consolodate cmd_arg_into_msg to at_cmd_parser_inst.into_msg()
-                                let msg_cmd: Option<MessageTuple> = parser::cmd_arg_into_msg(ctx.local.at_cmd_parser_inst.get_cmd_arg());
+                                let msg_cmd: Option<MessageTuple> = ctx.local.at_cmd_parser_inst.into_msg();
 
                                 if let Some((network_id, ack_required, ttl, payload)) = msg_cmd {
                                     defmt::info!("AtMsgSend: id:{} ack:{} ttl:{} payload_len:{}", 
@@ -521,6 +533,119 @@ mod app {
                                         )
                                     );
                                 });                            
+                            }
+                            AtCommandSet::AtFreq => {
+                                (
+                                    &mut ctx.shared.radio_inst
+                                ).lock(|radio_inst| {
+                                    let resp = if let Some(arg) = ctx.local.at_cmd_parser_inst.get_cmd_arg_as_u32() {
+                                        match radio_inst.set_frequency(arg) {
+                                            Ok(v) => v,
+                                            Err(e) => { defmt::error!("set_frequency error: {}", e); String::try_from("Error").unwrap() }
+                                        }
+                                    } else {
+                                        radio_inst.get_frequency()
+                                    };
+                                    write_slice_uart1(uart1, 
+                                        ctx.local.at_resp_gen_inst.fmt_resp_str_as_str_slice(
+                                            rx_cmd_enum, 
+                                            resp.trim()
+                                        )
+                                    );
+                                });
+                            }
+                            AtCommandSet::AtPwr => {
+                                (
+                                    &mut ctx.shared.radio_inst
+                                ).lock(|radio_inst| {
+                                    let resp = if let Some(arg) = ctx.local.at_cmd_parser_inst.get_cmd_arg_as_u32() {
+                                        match radio_inst.set_tx_power(arg) {
+                                            Ok(v) => v,
+                                            Err(e) => { defmt::error!("set_tx_power error: {}", e); String::try_from("Error").unwrap() }
+                                        }
+                                    } else {
+                                        radio_inst.get_tx_power()
+                                    };
+                                    write_slice_uart1(uart1, 
+                                        ctx.local.at_resp_gen_inst.fmt_resp_str_as_str_slice(
+                                            rx_cmd_enum, 
+                                            resp.trim()
+                                        )
+                                    );
+                                });
+                            }
+                            AtCommandSet::AtVer => {
+                                (
+                                    &mut ctx.shared.radio_inst
+                                ).lock(|radio_inst| {
+                                    let resp = radio_inst.get_version();
+                                    write_slice_uart1(uart1, 
+                                        ctx.local.at_resp_gen_inst.fmt_resp_str_as_str_slice(
+                                            rx_cmd_enum, 
+                                            resp.trim()
+                                        )
+                                    );
+                                });
+                            }
+                            AtCommandSet::AtRoutes => {
+                                (
+                                    &mut ctx.shared.mesh_inst,
+                                ).lock(|mesh_inst| {
+                                    let num_nodes = mesh_inst.table.get_num_nodes();
+                                    if num_nodes > 0 {
+                                        for node_idx in 0..num_nodes {
+                                            if let Some(node_data) = mesh_inst.table.get_node_by_idx(node_idx) {                                                
+                                                write_slice_uart1(uart1, 
+                                                    ctx.local.at_resp_gen_inst.fmt_resp_peer_as_str_slice(node_data)
+                                                );
+                                            }
+                                        }
+                                    }
+                                    else {
+                                        write_str_uart1(uart1, "\n\r0 Routes");
+                                    }
+                                    write_str_uart1(uart1, "\n\rOk\n\r>");
+                                });
+                            }
+                            AtCommandSet::AtBw => {
+                                (
+                                    &mut ctx.shared.radio_inst
+                                ).lock(|radio_inst| {
+                                    let resp = if let Some(arg) = ctx.local.at_cmd_parser_inst.get_cmd_arg_as_u32() {
+                                        match radio_inst.set_bandwidth(arg) {
+                                            Ok(v) => v,
+                                            Err(e) => { defmt::error!("set_bandwidth error: {}", e); String::try_from("Error").unwrap() }
+                                        }
+                                    } else {
+                                        radio_inst.get_bandwidth()
+                                    };
+                                    write_slice_uart1(uart1, 
+                                        ctx.local.at_resp_gen_inst.fmt_resp_str_as_str_slice(
+                                            rx_cmd_enum, 
+                                            resp.trim()
+                                        )
+                                    );
+                                });
+                            }
+                            AtCommandSet::AtCr => {
+                                (
+                                    &mut ctx.shared.radio_inst
+                                ).lock(|radio_inst| {
+                                    let resp = if let Some(arg) = ctx.local.at_cmd_parser_inst.get_cmd_arg_as_u32() {
+                                        match radio_inst.set_coding_rate(arg) {
+                                            Ok(v) => v,
+                                            Err(e) => { defmt::error!("set_coding_rate error: {}", e); String::try_from("Error").unwrap() }
+                                        }
+                                    } else {
+                                        radio_inst.get_coding_rate()
+                                    };
+                                    write_slice_uart1(uart1, 
+                                        ctx.local.at_resp_gen_inst.fmt_resp_str_as_str_slice(
+                                            rx_cmd_enum, 
+                                            resp.trim()
+                                        )
+                                    );
+                                });
                             }
                             AtCommandSet::RoutingTable => {
                                 (

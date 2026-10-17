@@ -27,15 +27,40 @@ impl BmRoute {
         if self.rssi_samples.is_full() {
             self.rssi_samples.pop();
         }
-        // Add newest sample
-        self.rssi_samples.push(_rssi).unwrap();
+        // Add newest sample - if still full after pop, just overwrite oldest (shouldn't happen but safe)
+        if self.rssi_samples.push(_rssi).is_err() {
+            // Vec is still full, replace oldest sample
+            if !self.rssi_samples.is_empty() {
+                self.rssi_samples[0] = _rssi;
+            }
+        }
 
-        // Avergae rssi samples
+        // Average rssi samples
         self.avg_rssi = self.rssi_samples.iter().map(|&rssi| rssi as i32).sum::<i32>() / self.rssi_samples.len() as i32;
     }
 
     pub fn get_next_hop(&mut self) -> NetworkId {
         self.next_hop
+    }
+
+    pub fn next_hop(&self) -> NetworkId {
+        self.next_hop
+    }
+
+    pub fn distance(&self) -> u8 {
+        self.distance
+    }
+
+    pub fn avg_rssi(&self) -> i32 {
+        self.avg_rssi
+    }
+
+    pub fn rssi_samples_len(&self) -> usize {
+        self.rssi_samples.len()
+    }
+
+    pub fn failures(&self) -> u8 {
+        self.failures
     }
 }
 
@@ -106,7 +131,10 @@ impl BmNodeEntry {
         new_route.update_rssi(rssi);
 
         // Add new route to list
-        self.routes.push(new_route).unwrap();
+        if self.routes.push(new_route).is_err() {
+            defmt::error!("add_new_route: routes queue full after cleanup");
+            return;
+        }
 
         self.determine_primary_route();
     }
@@ -138,6 +166,14 @@ impl BmNodeEntry {
             return Some(self.routes[route_idx].clone())
         }
         None
+    }
+
+    pub fn routes(&self) -> core::slice::Iter<'_, BmRoute> {
+        self.routes.iter()
+    }
+
+    pub fn primary_route_idx(&self) -> Option<usize> {
+        self.primary_route_idx
     }
 
     //-----------------------------------------------------------

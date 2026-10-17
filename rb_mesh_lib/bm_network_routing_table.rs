@@ -76,7 +76,9 @@ impl BmNetworkRoutingTable {
     }
 
     pub fn add_node(&mut self, new_node: BmNodeEntry) {
-        self.nodes.push(new_node).unwrap();
+        if self.nodes.push(new_node).is_err() {
+            defmt::error!("add_node: routing table full");
+        }
     }
 
     pub fn get_num_nodes(&mut self) -> usize {
