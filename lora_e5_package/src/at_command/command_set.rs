@@ -30,8 +30,8 @@ const CONST_AT_COMMAND_STRINGS: &'static [&'static [&str]] =
     &["AT+CR", "+CR:", "Command to get/set LoRa coding rate (4/x).\n\rFormat: AT+CR=<4|5|6|7|8>", "Y"],
     &["AT+RING", "+RING: ", "Command to enable/disable ring indicator.", "Y"],
     &["AT+ROUTES", "+ROUTES:", "Command to show detailed route info per node (RSSI, distance, routes).", "N"],
-    &["AT+NODES", "", "Command to print out node list.", "N"],
-    &["AT+ST", "+", "Command to get radio status.", "N"],
+    &["AT+NODES", "+NODES:", "Command to print out node list.", "N"],
+    &["AT+ST", "+ST:", "Command to get radio status.", "N"],
     &["AT?", "", "Command to get list of available commands.", "N"],
 ];
 
@@ -54,12 +54,12 @@ pub enum AtCommandSet {
     AtFreq,
     AtPwr,
     AtVer,
-    AtRoutes,
     AtBw,
     AtCr,
     RingIndicator,
-    RoutingTable,
-    RadioStatus,
+    AtRoutes,
+    AtNodes,
+    AtSt,
     AtList,
 
     // Below are not in CONST_AT_COMMAND_STRINGS
@@ -81,14 +81,14 @@ impl defmt::Format for AtCommandSet {
             AtCommandSet::AtFreq => write!(fmt, "AtFreq"),
             AtCommandSet::AtPwr => write!(fmt, "AtPwr"),
             AtCommandSet::AtVer => write!(fmt, "AtVer"),
-            AtCommandSet::AtRoutes => write!(fmt, "AtRoutes"),
             AtCommandSet::AtBw => write!(fmt, "AtBw"),
             AtCommandSet::AtCr => write!(fmt, "AtCr"),
             AtCommandSet::RingIndicator => write!(fmt, "RingIndicator"),
-            AtCommandSet::RoutingTable => write!(fmt, "RoutingTable"),
-            AtCommandSet::RadioStatus => write!(fmt, "RadioStatus"),
-
+            AtCommandSet::AtRoutes => write!(fmt, "AtRoutes"),
+            AtCommandSet::AtNodes => write!(fmt, "AtNodes"),
+            AtCommandSet::AtSt => write!(fmt, "AtSt"),
             AtCommandSet::AtList => write!(fmt, "AtList"),
+
             AtCommandSet::NewLine => write!(fmt, "NewLine"),
             _ => { write!(fmt, "Unknown") }
         }
@@ -112,12 +112,12 @@ impl AtCommandSet {
             8 => AtCommandSet::AtFreq,
             9 => AtCommandSet::AtPwr,
             10 => AtCommandSet::AtVer,
-            11 => AtCommandSet::AtRoutes,
-            12 => AtCommandSet::AtBw,
-            13 => AtCommandSet::AtCr,
-            14 => AtCommandSet::RingIndicator,
-            15 => AtCommandSet::RoutingTable,
-            16 => AtCommandSet::RadioStatus,
+            11 => AtCommandSet::AtBw,
+            12 => AtCommandSet::AtCr,
+            13 => AtCommandSet::RingIndicator,
+            14 => AtCommandSet::AtRoutes,
+            15 => AtCommandSet::AtNodes,
+            16 => AtCommandSet::AtSt,
             17 => AtCommandSet::AtList,
             18 => AtCommandSet::NewLine,
             _ => AtCommandSet::Unknown,
@@ -176,3 +176,7 @@ impl AtCommandSet {
         }
     }
 }
+
+// Compile-time assertion: verify enum count matches array count
+const _: () = assert!(CONST_AT_COMMAND_STRINGS.len() == 18, 
+    "CONST_AT_COMMAND_STRINGS length must match AtCommandSet enum variants (excluding NewLine/Unknown)");

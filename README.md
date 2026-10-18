@@ -16,7 +16,6 @@ I used custom PCB for this development but the "Wio-E5 mini Dev Board" should wo
 ![Alt text](resources/3d_render.png?raw=true "Custom PCB")
 
 ## Todo's / Issue's:
-- Add network discovery retries.
 - Improve route managment. Currently store 5 and always delete the oldest.
 - Test with more nodes. Have only tested with 2 nodes.
 - Add periodic neighbor table transmits. Might want to TX subset/only 3 entries. Maybe one every 10min?
@@ -24,17 +23,50 @@ I used custom PCB for this development but the "Wio-E5 mini Dev Board" should wo
 
 ## Environment Setup:
 
-### Setup in WSL:
+### Setup in WSL / Linux:
 
-If you’re a Windows Subsystem for Linux user run the following in your terminal, then follow the on-screen instructions to install Rust.
+If you're a Windows Subsystem for Linux user run the following in your terminal, then follow the on-screen instructions to install Rust.
 
-`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-
-`. "$HOME/.cargo/env"`
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+. "$HOME/.cargo/env"
+```
 
 Download the target with:
 
-`rustup target add thumbv7m-none-eabi`
+```bash
+rustup target add thumbv7m-none-eabi
+```
+
+Install probe-rs:
+
+```bash
+cargo install probe-rs-tools
+# Or install cargo-embed for flash + RTT logging
+cargo install cargo-embed
+```
+
+#### Linux udev rules for ST-Link (required for probe-rs access):
+
+If `probe-rs list` shows your probe as "inaccessible", create udev rules:
+
+```bash
+sudo tee /etc/udev/rules.d/49-stlink.rules << 'EOF'
+SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="3748", MODE="0666", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="374b", MODE="0666", GROUP="plugdev"
+EOF
+
+sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo usermod -aG plugdev $USER
+newgrp plugdev  # or re-login
+```
+
+Then verify:
+
+```bash
+probe-rs list
+# Should show probe without "inaccessible"
+```
 
 ## Build/Run/Test Commands:
 General rust/cargo command to initialize project space:<br />
@@ -84,4 +116,5 @@ My knock off probe works with this. Does not work with STM programmer software.
 1 led unit ID is: 5677364<br />
 
 AT+MSEND=5678875,true,1,hello
+AT+MSEND=5677364,true,1,hello
 

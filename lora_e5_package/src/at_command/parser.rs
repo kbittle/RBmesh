@@ -37,10 +37,10 @@ impl CommandParser {
         let mut command_accepted = AtCommandSet::Unknown;
         let mut print_help = false;
         
-        // If enter character is received, handle command
-        if in_char == CARRIAGE_RETURN {
+        // If enter character is received (LF or CR), handle command
+        if in_char == 0x0A || in_char == CARRIAGE_RETURN {
             if self.cmd_buffer.len() == 0 {
-                //defmt::info!("new line");
+                // Empty line - triggers > prompt
                 return Some((AtCommandSet::NewLine, false));
             }
             else if self.cmd_buffer.len() < 2 {
@@ -51,8 +51,8 @@ impl CommandParser {
                 return None;
             }
 
-            // Turn into slice
-            let command_str = self.cmd_buffer.as_str();
+            // Turn into slice and trim whitespace
+            let command_str = self.cmd_buffer.as_str().trim();
             //defmt::info!("Command received: {}", command_str);
 
             // Check for AT at start
@@ -84,7 +84,8 @@ impl CommandParser {
             // Handle write commands
             else if command_str.contains("=") {
                 let split_str: Vec<&str, 2> = command_str.split("=").collect();
-                if let Some(found_cmd) = AtCommandSet::match_command(split_str[0]) {
+                let cmd_part = split_str[0].trim();
+                if let Some(found_cmd) = AtCommandSet::match_command(cmd_part) {
                     if AtCommandSet::allow_write(found_cmd) {
                         // Grab str after command
                         if split_str.len() > 1 {
@@ -138,18 +139,17 @@ impl CommandParser {
     pub fn into_msg(&mut self) -> Option<MessageTuple> {
         let args: Vec<&str, 5> = self.argument_buffer.split(',').collect();
         
-        if args.len() == 4 {
-            let network_id = Some(args[0].parse().unwrap());
-            let ack_required = args[1] == "true";
-            let ttl = args[2].parse().unwrap();
-            let mut payload: BmNetworkPacketPayload = Vec::new();
-            unwrap!(payload.extend_from_slice(args[3].as_bytes()));
-            return Some((network_id, ack_required, ttl, payload))
-        }
-        else {
+        if args.len() != 4 {
             defmt::error!("into_msg: invalid args len={}", args.len());
+            return None;
         }
-        None
+
+        let network_id = args[0].parse::<u32>().ok().map(Some)?;
+        let ack_required = args[1] == "true";
+        let ttl = args[2].parse::<u8>().ok()?;
+        let mut payload: BmNetworkPacketPayload = Vec::new();
+        payload.extend_from_slice(args[3].as_bytes()).ok()?;
+        Some((network_id, ack_required, ttl, payload))
     }
 
     //-----------------------------------------------------------

@@ -13,6 +13,8 @@ pub enum BmEngineStatus {
     #[default]
     Idle,
     PerformingNetworkDiscovery,
+    NetworkDiscoveryStarted,
+    RetryingNetworkDiscovery,
     RouteFound,
     SendingPayload,
     RetryingPayload,
@@ -28,6 +30,8 @@ impl defmt::Format for BmEngineStatus {
         match self {
             BmEngineStatus::Idle => write!(fmt, "Idle"),
             BmEngineStatus::PerformingNetworkDiscovery => write!(fmt, "PerformingNetworkDiscovery"),
+            BmEngineStatus::NetworkDiscoveryStarted => write!(fmt, "NetworkDiscoveryStarted"),
+            BmEngineStatus::RetryingNetworkDiscovery => write!(fmt, "RetryingNetworkDiscovery"),
             BmEngineStatus::RouteFound => write!(fmt, "RouteFound"),
             BmEngineStatus::SendingPayload => write!(fmt, "SendingPayload"),
             BmEngineStatus::RetryingPayload => write!(fmt, "RetryingPayload"),
@@ -305,13 +309,28 @@ impl BmNetworkEngine {
     pub fn run_engine(&mut self, current_time_millis: i64) -> BmEngineStatus {
         let current_engine_status = self.engine_status.clone();
         match current_engine_status {
+            BmEngineStatus::NetworkDiscoveryStarted => {
+                if let Some(pkt) = self.get_working_packet() {
+                    if pkt.tx_complete_timestamp.is_none() {
+                        return BmEngineStatus::NetworkDiscoveryStarted;
+                    }
+                }
+                self.engine_status = BmEngineStatus::PerformingNetworkDiscovery;
+            }
             BmEngineStatus::PerformingNetworkDiscovery => {
                 // Timeout on route discovery
                 if let Some(pkt) = self.get_working_packet() {
                     if let Some(tx_comp_time) = pkt.tx_complete_timestamp {
                         if current_time_millis - tx_comp_time > 10000 {    
-                            defmt::info!("run_engine: PerformingNetworkDiscovery - timeout");
-                            self.engine_status = BmEngineStatus::ErrorNoRoute;
+                            defmt::info!("run_engine: PerformingNetworkDiscovery - timeout, tx_count={}", pkt.tx_count);
+                            if pkt.tx_count <= BM_DISCOVERY_RETRY_COUNT {
+                                let dest = pkt.get_destination();
+                                defmt::info!("run_engine: Retrying discovery, attempt {} for dest={}", pkt.tx_count, dest);
+                                self.engine_status = BmEngineStatus::RetryingNetworkDiscovery;
+                            } else {
+                                defmt::info!("run_engine: Discovery retries exhausted");
+                                self.engine_status = BmEngineStatus::ErrorNoRoute;
+                            }
                         }
                     }
                 } else {
@@ -397,9 +416,19 @@ impl BmNetworkEngine {
                     self.engine_status = BmEngineStatus::Idle;
                 }
             }
+            BmEngineStatus::RetryingNetworkDiscovery => {
+                if let Some(pkt) = self.get_working_packet() {
+                    pkt.set_ok_to_transmit();
+                    pkt.tx_complete_timestamp = None;
+                    self.engine_status = BmEngineStatus::PerformingNetworkDiscovery;
+                } else {
+                    defmt::error!("RetryingNetworkDiscovery: no working packet");
+                    self.engine_status = BmEngineStatus::ErrorNoRoute;
+                }
+            }
             _ => { }
         }
-        current_engine_status
+        self.engine_status.clone()
     }
 
     //-----------------------------------------------------------
@@ -425,7 +454,7 @@ impl BmNetworkEngine {
         }
 
         self.working_outbound_index = Some(self.outbound.len() - 1);
-        self.engine_status = BmEngineStatus::PerformingNetworkDiscovery;
+        self.engine_status = BmEngineStatus::NetworkDiscoveryStarted;
     }
 
     fn clear_working_packet(&mut self) {

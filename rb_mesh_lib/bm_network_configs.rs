@@ -5,6 +5,9 @@ pub const BM_MAX_NET_DEVICES: usize = 100;
 // Number of retries allowed on acknowledged data packets.
 pub const BM_PACKET_RETRY_COUNT: u8 = 2;
 
+// Number of retries allowed on network discovery requests.
+pub const BM_DISCOVERY_RETRY_COUNT: u8 = 1;
+
 // Pkt type + Sizeof(BmNetworkPacketHdr)
 pub const BM_PACKET_HDR_SIZE: usize = 18;
 
