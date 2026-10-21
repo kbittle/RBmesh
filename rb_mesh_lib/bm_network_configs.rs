@@ -8,6 +8,12 @@ pub const BM_PACKET_RETRY_COUNT: u8 = 2;
 // Number of retries allowed on network discovery requests.
 pub const BM_DISCOVERY_RETRY_COUNT: u8 = 1;
 
+// Timeout for a network discovery request in milliseconds.
+pub const BM_DISCOVERY_TIMEOUT_MILLIS: i64 = 10000;
+
+// Timeout for an acknowledged data packet in milliseconds.
+pub const BM_PACKET_ACK_TIMEOUT_MILLIS: i64 = 10000;
+
 // Pkt type + Sizeof(BmNetworkPacketHdr)
 pub const BM_PACKET_HDR_SIZE: usize = 18;
 

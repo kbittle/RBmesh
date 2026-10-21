@@ -12,8 +12,8 @@ use defmt::write;
 pub enum BmEngineStatus {
     #[default]
     Idle,
-    PerformingNetworkDiscovery,
     NetworkDiscoveryStarted,
+    PerformingNetworkDiscovery,
     RetryingNetworkDiscovery,
     RouteFound,
     SendingPayload,
@@ -29,8 +29,8 @@ impl defmt::Format for BmEngineStatus {
     fn format(&self, fmt: defmt::Formatter) {
         match self {
             BmEngineStatus::Idle => write!(fmt, "Idle"),
-            BmEngineStatus::PerformingNetworkDiscovery => write!(fmt, "PerformingNetworkDiscovery"),
             BmEngineStatus::NetworkDiscoveryStarted => write!(fmt, "NetworkDiscoveryStarted"),
+            BmEngineStatus::PerformingNetworkDiscovery => write!(fmt, "PerformingNetworkDiscovery"),
             BmEngineStatus::RetryingNetworkDiscovery => write!(fmt, "RetryingNetworkDiscovery"),
             BmEngineStatus::RouteFound => write!(fmt, "RouteFound"),
             BmEngineStatus::SendingPayload => write!(fmt, "SendingPayload"),
@@ -118,7 +118,8 @@ impl BmNetworkEngine {
                 }
                 BmPacketTypes::RouteDiscoveryResponse => {    
                     // Discovery Response addressed to us. Theoretically our route is found.
-                    if self.engine_status == BmEngineStatus::PerformingNetworkDiscovery {
+                    if self.engine_status == BmEngineStatus::PerformingNetworkDiscovery
+                        || self.engine_status == BmEngineStatus::NetworkDiscoveryStarted {
                         defmt::info!("rb_engine: Rx Disc Resp, route found");
                         self.engine_status = BmEngineStatus::RouteFound;
                     }
@@ -130,7 +131,8 @@ impl BmNetworkEngine {
                     defmt::info!("rb_engine: Rx Disc Error from {}", new_packet.get_source());
     
                     // Route discovery failed for a destination we were trying to reach
-                    if self.engine_status == BmEngineStatus::PerformingNetworkDiscovery {
+                    if self.engine_status == BmEngineStatus::PerformingNetworkDiscovery
+                        || self.engine_status == BmEngineStatus::NetworkDiscoveryStarted {
                         // Check if this error is for our current discovery target
                         if let Some(pkt) = self.get_working_packet() {
                             if pkt.get_destination() == new_packet.get_source() {
@@ -321,7 +323,7 @@ impl BmNetworkEngine {
                 // Timeout on route discovery
                 if let Some(pkt) = self.get_working_packet() {
                     if let Some(tx_comp_time) = pkt.tx_complete_timestamp {
-                        if current_time_millis - tx_comp_time > 10000 {    
+                        if current_time_millis - tx_comp_time > BM_DISCOVERY_TIMEOUT_MILLIS {    
                             defmt::info!("run_engine: PerformingNetworkDiscovery - timeout, tx_count={}", pkt.tx_count);
                             if pkt.tx_count <= BM_DISCOVERY_RETRY_COUNT {
                                 let dest = pkt.get_destination();
@@ -337,6 +339,16 @@ impl BmNetworkEngine {
                     defmt::error!("PerformingNetworkDiscovery: no working packet");
                     self.engine_status = BmEngineStatus::ErrorNoRoute;
                 }                     
+            }
+            BmEngineStatus::RetryingNetworkDiscovery => {
+                if let Some(pkt) = self.get_working_packet() {
+                    pkt.set_ok_to_transmit();
+                    pkt.tx_complete_timestamp = None;
+                    self.engine_status = BmEngineStatus::PerformingNetworkDiscovery;
+                } else {
+                    defmt::error!("RetryingNetworkDiscovery: no working packet");
+                    self.engine_status = BmEngineStatus::ErrorNoRoute;
+                }
             }
             BmEngineStatus::RouteFound => {
                 // Remove node discovery packet from outbound
@@ -369,7 +381,7 @@ impl BmNetworkEngine {
             BmEngineStatus::WaitingForAck => {
                 if let Some(pkt) = self.get_working_packet() {
                     if let Some(tx_comp_time) = pkt.tx_complete_timestamp {
-                        if current_time_millis - tx_comp_time > 10000 {    
+                        if current_time_millis - tx_comp_time > BM_PACKET_ACK_TIMEOUT_MILLIS {    
                             defmt::info!("run_engine: WaitingForAck -> ErrorNoAck");
                             let next_hop = pkt.get_next_hop();
                             let _ = pkt;
@@ -383,6 +395,10 @@ impl BmNetworkEngine {
                 }                
             }
             BmEngineStatus::AckReceieved => {
+                let dest = self.get_working_packet().map(|pkt| pkt.get_destination());
+                if let Some(dest) = dest {
+                    self.table.set_node_success(dest);
+                }
                 defmt::info!("run_engine: AckReceieved -> Complete");
                 self.engine_status = BmEngineStatus::Complete;
             }
@@ -416,19 +432,9 @@ impl BmNetworkEngine {
                     self.engine_status = BmEngineStatus::Idle;
                 }
             }
-            BmEngineStatus::RetryingNetworkDiscovery => {
-                if let Some(pkt) = self.get_working_packet() {
-                    pkt.set_ok_to_transmit();
-                    pkt.tx_complete_timestamp = None;
-                    self.engine_status = BmEngineStatus::PerformingNetworkDiscovery;
-                } else {
-                    defmt::error!("RetryingNetworkDiscovery: no working packet");
-                    self.engine_status = BmEngineStatus::ErrorNoRoute;
-                }
-            }
             _ => { }
         }
-        self.engine_status.clone()
+        current_engine_status
     }
 
     //-----------------------------------------------------------
@@ -454,7 +460,7 @@ impl BmNetworkEngine {
         }
 
         self.working_outbound_index = Some(self.outbound.len() - 1);
-        self.engine_status = BmEngineStatus::NetworkDiscoveryStarted;
+        self.engine_status = BmEngineStatus::PerformingNetworkDiscovery;
     }
 
     fn clear_working_packet(&mut self) {
@@ -566,12 +572,11 @@ impl BmNetworkEngine {
                 None
             ).with_ok_to_transmit(),
         ).is_err() {
-            defmt::error!("generate_route_discovery_error: outbound queue full");
+            defmt::error!("outbound queue full");
         }
     }
     
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,27 +639,52 @@ mod tests {
         let mut bm_engine = BmNetworkEngine::new(Some(1));
         let payload = BmNetworkPacketPayload::default();
 
+        let tx_time: i64 = 1000;
+        let timeout = BM_DISCOVERY_TIMEOUT_MILLIS as i64;
+        let retries = BM_DISCOVERY_RETRY_COUNT as usize;
+
         // Initiate transfer
         let _ = bm_engine.initiate_packet_transfer(Some(2), true, 5, payload);
-        bm_engine.run_engine(0); // Transition into PerformingNetworkDiscovery
+        assert_eq!(bm_engine.run_engine(0), BmEngineStatus::PerformingNetworkDiscovery);
 
-        // Simulate transmit finishing at t = 1000ms
-        bm_engine.set_next_outbound_complete(1000);
+        // Simulate transmit finishing
+        bm_engine.set_next_outbound_complete(tx_time);
 
-        // Check state before timeout threshold (< 10000ms elapsed)
-        assert_eq!(bm_engine.run_engine(5000), BmEngineStatus::PerformingNetworkDiscovery);
+        let mut t = tx_time;
+        for attempt in 0..=retries {
+            let is_last = attempt == retries;
 
-        // Check state at timeout boundary (1000 + 10000 = 11000ms, not exceeded)
-        // The condition is > 10000, so at 10000ms elapsed it does NOT transition
-        assert_eq!(bm_engine.run_engine(11000), BmEngineStatus::PerformingNetworkDiscovery);
-        
-        // At 11001ms: elapsed = 10001ms > 10000, transitions to ErrorNoRoute
-        // run_engine returns the PREVIOUS status, so this call returns PerformingNetworkDiscovery
-        // but internally transitions to ErrorNoRoute
-        assert_eq!(bm_engine.run_engine(11001), BmEngineStatus::PerformingNetworkDiscovery);
-        
-        // Next call returns the new status (ErrorNoRoute)
-        assert_eq!(bm_engine.run_engine(11002), BmEngineStatus::ErrorNoRoute);
+            // Before timeout threshold
+            assert_eq!(
+                bm_engine.run_engine(t + timeout / 2),
+                BmEngineStatus::PerformingNetworkDiscovery
+            );
+
+            // Timeout fires
+            assert_eq!(
+                bm_engine.run_engine(t + timeout + 1),
+                BmEngineStatus::PerformingNetworkDiscovery
+            );
+
+            if is_last {
+                // Retries exhausted -> ErrorNoRoute
+                assert_eq!(
+                    bm_engine.run_engine(t + timeout + 2),
+                    BmEngineStatus::ErrorNoRoute
+                );
+            } else {
+                // Retry initiated
+                assert_eq!(
+                    bm_engine.run_engine(t + timeout + 2),
+                    BmEngineStatus::RetryingNetworkDiscovery
+                );
+
+                // Simulate retry transmit finishing
+                let retry_tx_time = t + timeout + 2;
+                bm_engine.set_next_outbound_complete(retry_tx_time);
+                t = retry_tx_time;
+            }
+        }
     }
 
     #[test]

@@ -23,13 +23,13 @@ pub struct BmRoute {
 
 impl BmRoute {
     fn update_rssi(&mut self, _rssi:RssiType) {
-        // Remove oldest sample if full
+        // Remove oldest sample if full (index 0 is oldest)
         if self.rssi_samples.is_full() {
-            self.rssi_samples.pop();
+            self.rssi_samples.remove(0);
         }
-        // Add newest sample - if still full after pop, just overwrite oldest (shouldn't happen but safe)
+        // Add newest sample at the end
         if self.rssi_samples.push(_rssi).is_err() {
-            // Vec is still full, replace oldest sample
+            // Fallback: overwrite oldest sample
             if !self.rssi_samples.is_empty() {
                 self.rssi_samples[0] = _rssi;
             }
@@ -39,7 +39,7 @@ impl BmRoute {
         self.avg_rssi = self.rssi_samples.iter().map(|&rssi| rssi as i32).sum::<i32>() / self.rssi_samples.len() as i32;
     }
 
-    pub fn get_next_hop(&mut self) -> NetworkId {
+    pub fn get_next_hop(&self) -> NetworkId {
         self.next_hop
     }
 
@@ -106,6 +106,12 @@ impl BmNodeEntry {
         }
     }
 
+    pub fn record_success(&mut self) {
+        if let Some(route_idx) = self.primary_route_idx {
+            self.routes[route_idx].failures = self.routes[route_idx].failures.saturating_sub(1);
+        }
+    }
+
     pub fn add_new_route(&mut self, next_hop: NetworkId, distance: u8, millis: TimeType, rssi: RssiType) {
         if self.routes.len() >= BM_MAX_DEVICE_ROUTES {
             defmt::error!("BmNodeEntry: route list full");
@@ -114,7 +120,7 @@ impl BmNodeEntry {
             // Might not want to delete oldest route.
 
             // Clean up old routes
-            self.delete_oldest_route();
+            self.delete_worst_route();
         }
 
         defmt::info!("BmNodeEntry: add_new_route");
@@ -161,7 +167,7 @@ impl BmNodeEntry {
         self.determine_primary_route();
     }
 
-    pub fn get_best_route(&mut self) -> Option<BmRoute> {
+    pub fn get_best_route(&self) -> Option<BmRoute> {
         if let Some(route_idx) = self.primary_route_idx {
             return Some(self.routes[route_idx].clone())
         }
@@ -187,11 +193,13 @@ impl BmNodeEntry {
     }
 
     fn determine_primary_route(&mut self) {
+        let newest = self.routes.iter().map(|r| r.timestamp_millis).max().unwrap_or(0);
+
         for (index, route) in self.routes.iter().enumerate() {
             if let Some(primary_index) = self.primary_route_idx {
-                // Ensure we dont compare primary rpoute against itself
+                // Ensure we dont compare primary route against itself
                 if index != primary_index {
-                    if compare_routes(&self.routes[primary_index], route) {
+                    if compare_routes(&self.routes[primary_index], route, newest) {
                         // Update primary route
                         self.primary_route_idx = Some(index);
                     }
@@ -204,28 +212,46 @@ impl BmNodeEntry {
         }
     }
 
-    fn delete_oldest_route(&mut self) {
-        let mut oldest_route_idx: usize = 0;
+    fn delete_worst_route(&mut self) {
+        if self.routes.is_empty() {
+            return;
+        }
+
+        let newest = self.routes.iter().map(|r| r.timestamp_millis).max().unwrap_or(0);
+
+        let mut worst_route_idx: usize = 0;
+        let mut worst_metric = calc_route_metric(&self.routes[0], newest);
         for (index, route) in self.routes.iter().enumerate() {
-            if oldest_route_idx != index {
-                if route.timestamp_millis <
-                   self.routes[oldest_route_idx].timestamp_millis {
-                    oldest_route_idx = index;
-                }
+            let metric = calc_route_metric(route, newest);
+            if metric > worst_metric {
+                worst_metric = metric;
+                worst_route_idx = index;
             }
         }
 
-        defmt::info!("deleting oldest route, idx={}", oldest_route_idx);
+        defmt::info!("deleting worst route, idx={}", worst_route_idx);
 
-        self.routes.remove(oldest_route_idx);
+        // Keep primary_route_idx consistent with the removal
+        if let Some(primary_idx) = self.primary_route_idx {
+            if primary_idx == worst_route_idx {
+                self.primary_route_idx = None;
+            } else if primary_idx > worst_route_idx {
+                self.primary_route_idx = Some(primary_idx - 1);
+            }
+        }
+
+        self.routes.remove(worst_route_idx);
+
+        // Reselect primary route after mutation
+        self.determine_primary_route();
     }
 }
 
 // Function to compare two routes.
 // If route2 is better than route1, return true
 // Otherwise return false
-fn compare_routes(route1: &BmRoute, route2: &BmRoute) -> bool {
-    calc_route_metric(route1) > calc_route_metric(route2)
+fn compare_routes(route1: &BmRoute, route2: &BmRoute, newest: i64) -> bool {
+    calc_route_metric(route1, newest) > calc_route_metric(route2, newest)
 }
 
 // Calculate metric based off route data. Lower metric number is better.
@@ -235,7 +261,7 @@ fn compare_routes(route1: &BmRoute, route2: &BmRoute) -> bool {
 //     1    -87   0       117
 //     2    -80   0       140
 //     1    -112  1       192
-fn calc_route_metric(route: &BmRoute) -> i32 {
+fn calc_route_metric(route: &BmRoute, newest: i64) -> i32 {
     let mut metric: i32 = 0;
 
     // Prioritize closer routes
@@ -245,6 +271,10 @@ fn calc_route_metric(route: &BmRoute) -> i32 {
 
     // Route failures will penalize the link
     metric += route.failures as i32 * 50;
+
+    // Slightly penalize stale routes (low weight)
+    let age = (newest - route.timestamp_millis).max(0);
+    metric += (age / 100) as i32;
 
     metric
 }

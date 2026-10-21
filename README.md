@@ -16,7 +16,6 @@ I used custom PCB for this development but the "Wio-E5 mini Dev Board" should wo
 ![Alt text](resources/3d_render.png?raw=true "Custom PCB")
 
 ## Todo's / Issue's:
-- Improve route managment. Currently store 5 and always delete the oldest.
 - Test with more nodes. Have only tested with 2 nodes.
 - Add periodic neighbor table transmits. Might want to TX subset/only 3 entries. Maybe one every 10min?
 - Add some sort of randomized delay for transmitting. What happens when 3 nodes want to relay a packet? Adding a delay will help stagger packets and theoretically the other nodes will detect TX preambles and block.

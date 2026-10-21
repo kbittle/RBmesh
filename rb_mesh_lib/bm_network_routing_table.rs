@@ -63,13 +63,21 @@ impl BmNetworkRoutingTable {
         }
     }
 
-    pub fn get_next_hop(&mut self, dest_id: NetworkId) -> NetworkId {
-        // Search through node list for dest node
+    pub fn set_node_success(&mut self, dest_id: NetworkId) {
         if let Some(node_entry) = self.find_node_by_id(dest_id) {
-            // Get best route
-            if let Some(mut route) = node_entry.get_best_route() {                
-                // Return network id
-                return route.get_next_hop()
+            node_entry.record_success();
+        }
+    }
+
+    pub fn get_next_hop(&self, dest_id: NetworkId) -> NetworkId {
+        // Search through node list for dest node
+        for node_entry in &self.nodes {
+            if node_entry.dest_id == dest_id {
+                // Get best route
+                if let Some(route) = node_entry.get_best_route() {
+                    // Return network id
+                    return route.get_next_hop()
+                }
             }
         }
         None
