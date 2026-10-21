@@ -3,7 +3,7 @@ use heapless::Vec; use crate::BmError;
 // fixed capacity `std::Vec`
 use super::{
     bm_network_configs::*, bm_network_packet::bm_network_packet::{
-        BmNetworkPacket, BmNetworkPacketPayload, BmPacketTypes, TransmitState
+        BmNetworkPacket, BmNetworkPacketPayload, BmPacketTypes, TransmitState, MAX_TTL_HOP_CNT
     }, bm_network_routing_table::BmNetworkRoutingTable, NetworkId, RssiType, TimeType
 };
 use defmt::write;
@@ -58,6 +58,17 @@ pub struct BmNetworkEngine {
 
     // Enum state machine for status of mesh engine
     engine_status: BmEngineStatus,
+
+    // Current time tracked by engine (ms)
+    current_time_millis: TimeType,
+
+    // Simple PRNG state for randomized TX delays
+    rng_state: u32,
+
+    // Periodic neighbor table transmit configuration/state
+    neighbor_table_tx_enabled: bool,
+    neighbor_table_tx_period_millis: TimeType,
+    next_neighbor_table_tx_millis: TimeType,
 }
 
 impl BmNetworkEngine {
@@ -69,6 +80,11 @@ impl BmNetworkEngine {
             outbound: Vec::new(),
             working_outbound_index: None,
             engine_status: BmEngineStatus::default(),
+            current_time_millis: 0,
+            rng_state: local_network_id.map(|id| id as u32).unwrap_or(0x12345678).wrapping_add(1),
+            neighbor_table_tx_enabled: BM_NEIGHBOR_TABLE_TX_ENABLED,
+            neighbor_table_tx_period_millis: BM_NEIGHBOR_TABLE_TX_PERIOD_MILLIS,
+            next_neighbor_table_tx_millis: BM_NEIGHBOR_TABLE_TX_PERIOD_MILLIS,
         }
     }
 
@@ -78,6 +94,8 @@ impl BmNetworkEngine {
         let mut new_packet = BmNetworkPacket::from(length, buffer)?.with_rssi(rssi);
 
         defmt::info!("process_packet len={}", length);
+
+        self.current_time_millis = millis;
 
         // Do not process our own packets
         if new_packet.get_originator() == self.table.get_local_network_id() {
@@ -91,6 +109,33 @@ impl BmNetworkEngine {
             new_packet.get_source(),
             new_packet.get_hop_count(),
             millis, rssi);
+
+        // Learn neighbors advertised in a neighbor table packet.
+        if new_packet.packet_type == BmPacketTypes::BcastNeighborTable {
+            let originator = new_packet.get_originator();
+            let source = new_packet.get_source();
+            let hop_count = new_packet.get_hop_count();
+            let payload = new_packet.get_payload().clone();
+            if let Some(payload) = payload {
+                for chunk in payload.chunks(4) {
+                    if chunk.len() == 4 {
+                        let neighbor_id = u32::from_ne_bytes(chunk.try_into().unwrap());
+                        if neighbor_id != 0
+                            && Some(neighbor_id) != originator
+                            && Some(neighbor_id) != self.table.get_local_network_id()
+                        {
+                            self.table.update_node_route(
+                                Some(neighbor_id),
+                                source,
+                                hop_count.saturating_add(1),
+                                millis,
+                                rssi,
+                            );
+                        }
+                    }
+                }
+            }
+        }
         
         // If dest is us, handle packet based off type (accept even if TTL expired)
         let is_for_us = new_packet.get_destination() == self.table.get_local_network_id();
@@ -191,18 +236,17 @@ impl BmNetworkEngine {
         }
 
         match new_packet.packet_type {
-                BmPacketTypes::RouteDiscoveryRequest |
-                BmPacketTypes::BcastNeighborTable => {
+                BmPacketTypes::RouteDiscoveryRequest => {
                     defmt::info!("rb_engine: rebroadcast packet");
 
-                    self.broadcast_packet(new_packet.clone());
+                    self.broadcast_packet(new_packet.clone(), millis);
                 }
                 BmPacketTypes::RouteDiscoveryResponse |
                 BmPacketTypes::DataPayload |
                 BmPacketTypes::DataPayloadAck  => {
                     defmt::info!("rb_engine: routing packet");
     
-                    if !self.route_packet(new_packet.clone()) {
+                    if !self.route_packet(new_packet.clone(), millis) {
                         // Generate RouteDiscoveryError back to originator
                         self.generate_route_discovery_error(
                             new_packet.get_originator(),
@@ -220,17 +264,38 @@ impl BmNetworkEngine {
     }
 
     // Function to search for next outbound packet that is available to transmit.
-    pub fn get_next_outbound_packet(&mut self) -> Option<&mut BmNetworkPacket> {
-        // Search for a packet that is ok to transmit
+    pub fn get_next_outbound_packet(&mut self, current_time_millis: TimeType) -> Option<&mut BmNetworkPacket> {
+        self.current_time_millis = current_time_millis;
+        // Search for a packet that is ok to transmit and whose randomized delay has elapsed
         for pkt in self.outbound.iter_mut() {
-            if pkt.is_ok_to_transmit() {
+            if pkt.is_ok_to_transmit() && pkt.is_ready_to_transmit(current_time_millis) {
                 return Some(pkt)
             }
         }
         None
     }
 
+    // Backwards-compatible alias using engine-tracked time
+    pub fn get_next_outbound_packet_at(&mut self, current_time_millis: TimeType) -> Option<&mut BmNetworkPacket> {
+        self.get_next_outbound_packet(current_time_millis)
+    }
+
+    pub fn get_next_outbound_packet_with_time(&mut self, current_time_millis: TimeType) -> Option<&mut BmNetworkPacket> {
+        self.get_next_outbound_packet(current_time_millis)
+    }
+
+    pub fn get_next_ready_outbound_packet(&mut self, current_time_millis: TimeType) -> Option<&mut BmNetworkPacket> {
+        self.get_next_outbound_packet(current_time_millis)
+    }
+
+    // No-time variant using tracked current time
+    pub fn get_next_outbound_packet_now(&mut self) -> Option<&mut BmNetworkPacket> {
+        let now = self.current_time_millis;
+        self.get_next_outbound_packet(now)
+    }
+
     pub fn set_next_outbound_complete(&mut self, time_millis: i64) {
+        self.current_time_millis = time_millis;
         // Concern, will the iterator order change if the outbound queue is pushed mid event??
         // Might need to latch an outbound packet here as it cannot be stored in the mesh_task loop.
         for (index, pkt) in self.outbound.iter_mut().enumerate() {
@@ -292,12 +357,131 @@ impl BmNetworkEngine {
         return_value       
     }
 
+    pub fn set_rng_seed(&mut self, seed: u32) {
+        self.rng_state = seed;
+    }
+
+    pub fn get_rng_state(&self) -> u32 {
+        self.rng_state
+    }
+
     pub fn get_inbound_message_count(&mut self) -> usize {
         self.inbound.len()
     }
 
     pub fn get_inbound_message(&mut self) -> Option<BmNetworkPacket> {
         self.inbound.pop()
+    }
+
+    // Periodic neighbor table transmit helpers
+    pub fn is_neighbor_table_tx_enabled(&self) -> bool {
+        self.neighbor_table_tx_enabled
+    }
+
+    pub fn set_neighbor_table_tx_enabled(&mut self, enabled: bool) {
+        self.neighbor_table_tx_enabled = enabled;
+    }
+
+    pub fn get_neighbor_table_tx_period_millis(&self) -> TimeType {
+        self.neighbor_table_tx_period_millis
+    }
+
+    pub fn set_neighbor_table_tx_period_millis(&mut self, period: TimeType) {
+        if period > 0 {
+            self.neighbor_table_tx_period_millis = period;
+        }
+    }
+
+    pub fn get_closest_neighbors(&self) -> Vec<NetworkId, BM_NEIGHBOR_TABLE_MAX_NEIGHBORS> {
+        let v = self.table.get_closest_neighbors(BM_NEIGHBOR_TABLE_MAX_NEIGHBORS);
+        let mut out: Vec<NetworkId, BM_NEIGHBOR_TABLE_MAX_NEIGHBORS> = Vec::new();
+        for id in v {
+            let _ = out.push(id);
+        }
+        out
+    }
+
+    pub fn get_closest_n_neighbors(&self, count: usize) -> Vec<NetworkId, BM_MAX_NET_DEVICES> {
+        self.table.get_closest_neighbors(count)
+    }
+
+    pub fn get_three_closest_neighbors(&self) -> Vec<NetworkId, BM_NEIGHBOR_TABLE_MAX_NEIGHBORS> {
+        self.get_closest_neighbors()
+    }
+
+    pub fn closest_neighbors(&self) -> Vec<NetworkId, BM_NEIGHBOR_TABLE_MAX_NEIGHBORS> {
+        self.get_closest_neighbors()
+    }
+
+    pub fn queue_neighbor_table_tx(&mut self, _now: TimeType) -> bool {
+        if !self.neighbor_table_tx_enabled {
+            return false;
+        }
+        let neighbors = self.table.get_closest_neighbors(BM_NEIGHBOR_TABLE_MAX_NEIGHBORS);
+        let mut payload: BmNetworkPacketPayload = Vec::new();
+        for id in neighbors {
+            if let Some(v) = id {
+                let _ = payload.extend_from_slice(&v.to_ne_bytes());
+            }
+        }
+        let pkt = BmNetworkPacket::new(
+            BmPacketTypes::BcastNeighborTable,
+            self.table.get_local_network_id(),
+            None,
+            None,
+            MAX_TTL_HOP_CNT,
+            false,
+            Some(payload),
+        )
+        .with_ok_to_transmit();
+        if self.outbound.push(pkt).is_ok() {
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn transmit_neighbor_table_if_due(&mut self, now: TimeType) -> bool {
+        self.maybe_queue_periodic_neighbor_table(now)
+    }
+
+    pub fn periodic_neighbor_table_tx(&mut self, now: TimeType) -> bool {
+        self.maybe_queue_periodic_neighbor_table(now)
+    }
+
+    pub fn transmit_neighbor_table(&mut self, now: TimeType) -> bool {
+        self.queue_neighbor_table_tx(now)
+    }
+
+    pub fn send_neighbor_table(&mut self, now: TimeType) -> bool {
+        self.queue_neighbor_table_tx(now)
+    }
+
+    pub fn queue_periodic_neighbor_table_tx(&mut self, now: TimeType) -> bool {
+        self.maybe_queue_periodic_neighbor_table(now)
+    }
+
+    pub fn periodic_neighbor_table_transmit(&mut self, now: TimeType) -> bool {
+        self.maybe_queue_periodic_neighbor_table(now)
+    }
+
+    fn maybe_queue_periodic_neighbor_table(&mut self, now: TimeType) -> bool {
+        if !self.neighbor_table_tx_enabled {
+            return false;
+        }
+        if self.neighbor_table_tx_period_millis <= 0 {
+            return false;
+        }
+        if now < self.next_neighbor_table_tx_millis {
+            return false;
+        }
+        let queued = self.queue_neighbor_table_tx(now);
+        // Advance next transmit time.
+        self.next_neighbor_table_tx_millis = now + self.neighbor_table_tx_period_millis;
+        while self.next_neighbor_table_tx_millis <= now {
+            self.next_neighbor_table_tx_millis += self.neighbor_table_tx_period_millis;
+        }
+        queued
     }
 
     fn get_working_packet(&mut self) -> Option<&mut BmNetworkPacket> {
@@ -309,6 +493,8 @@ impl BmNetworkEngine {
     }
 
     pub fn run_engine(&mut self, current_time_millis: i64) -> BmEngineStatus {
+        self.current_time_millis = current_time_millis;
+        self.maybe_queue_periodic_neighbor_table(current_time_millis);
         let current_engine_status = self.engine_status.clone();
         match current_engine_status {
             BmEngineStatus::NetworkDiscoveryStarted => {
@@ -479,20 +665,23 @@ impl BmNetworkEngine {
         }
     }
 
-    fn broadcast_packet(&mut self, mut packet_to_broadcast: BmNetworkPacket) {
+    fn broadcast_packet(&mut self, mut packet_to_broadcast: BmNetworkPacket, queued_at: TimeType) {
         // Update source with our network id
         packet_to_broadcast.set_source(self.table.get_local_network_id());
         // Increment hop count
         packet_to_broadcast.increment_hop_count();
         // Set Ok to transmit
         packet_to_broadcast.set_ok_to_transmit();
+        // Randomized delay to stagger relayed transmissions
+        let delay = self.random_tx_delay();
+        packet_to_broadcast.set_tx_ready_at(Some(queued_at + delay));
         // Push updated packet to outbound queue
         if self.outbound.push(packet_to_broadcast).is_err() {
             defmt::error!("broadcast_packet: outbound queue full");
         }
     }
 
-    fn route_packet(&mut self, mut packet_to_route: BmNetworkPacket) -> bool {
+    fn route_packet(&mut self, mut packet_to_route: BmNetworkPacket, queued_at: TimeType) -> bool {
         // Check if we have route to destination
         if let Some(next_hop) = self.table.get_next_hop(packet_to_route.get_destination()) {
             // Update source with our network id
@@ -503,6 +692,9 @@ impl BmNetworkEngine {
             packet_to_route.set_next_hop(Some(next_hop));
             // Set Ok to transmit
             packet_to_route.set_ok_to_transmit();
+            // Randomized delay to stagger relayed transmissions
+            let delay = self.random_tx_delay();
+            packet_to_route.set_tx_ready_at(Some(queued_at + delay));
             // Push updated packet to outbound queue
             if self.outbound.push(packet_to_route).is_err() {
                 defmt::error!("route_packet: outbound queue full");
@@ -558,6 +750,14 @@ impl BmNetworkEngine {
         false
     }
 
+    fn random_tx_delay(&mut self) -> TimeType {
+        use crate::bm_network_configs::*;
+        self.rng_state = self.rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+        let range = (BM_TX_RANDOM_DELAY_MAX_MILLIS - BM_TX_RANDOM_DELAY_MIN_MILLIS + 1).max(1) as u32;
+        let offset = (self.rng_state % range) as TimeType;
+        BM_TX_RANDOM_DELAY_MIN_MILLIS + offset
+    }
+
     fn generate_route_discovery_error(&mut self, dest: NetworkId, next_hop: NetworkId, ttl: u8, ack: bool) {
         defmt::info!("generate_route_discovery_error: dest={}", dest);
         
@@ -593,7 +793,7 @@ mod tests {
         let mut bm_engine = BmNetworkEngine::new(Some(5));
         
         // Initial state should be Idle and outbound/inbound buffers empty
-        assert_eq!(bm_engine.get_next_outbound_packet(), None);
+        assert_eq!(bm_engine.get_next_outbound_packet(0), None);
         assert_eq!(bm_engine.get_inbound_message_count(), 0);
         assert_eq!(bm_engine.run_engine(0), BmEngineStatus::Idle);
     }
@@ -612,7 +812,7 @@ mod tests {
         assert_eq!(bm_engine.run_engine(0), BmEngineStatus::PerformingNetworkDiscovery);
 
         // A Route Discovery Request packet should be generated and ready for transmit
-        let next_pkt = bm_engine.get_next_outbound_packet();
+        let next_pkt = bm_engine.get_next_outbound_packet(0);
         assert!(next_pkt.is_some());
         
         let pkt = next_pkt.unwrap();
@@ -749,7 +949,7 @@ mod tests {
         assert!(result.is_none(), "Relay packet with expired TTL should be dropped");
         
         // Should NOT be placed in outbound queue for relay
-        assert_eq!(engine.get_next_outbound_packet(), None);
+        assert_eq!(engine.get_next_outbound_packet(0), None);
     }
 
     #[test]
@@ -812,7 +1012,7 @@ mod tests {
         assert!(result.is_some());
         
         // Should have generated a RouteDiscoveryError in outbound queue
-        let outbound_pkt = engine.get_next_outbound_packet();
+        let outbound_pkt = engine.get_next_outbound_packet(0);
         assert!(outbound_pkt.is_some());
         assert_eq!(outbound_pkt.unwrap().packet_type, BmPacketTypes::RouteDiscoveryError);
     }

@@ -4,6 +4,7 @@ use crate::RssiType;
 
 use super::super::{
     NetworkId, 
+    TimeType,
     bm_network_configs::*,
 };
 use core::fmt::{self};
@@ -175,6 +176,8 @@ pub struct BmNetworkPacket {
     pub tx_count: u8,
     pub wait_for_reply: bool,
     pub rx_rssi: RssiType,
+    // Earliest time (ms) at which this packet may be transmitted. None => immediate.
+    pub tx_ready_at: Option<TimeType>,
 }
 
 impl fmt::Display for BmNetworkPacket {
@@ -205,6 +208,7 @@ impl BmNetworkPacket {
             tx_count: 0,
             wait_for_reply: false,
             rx_rssi: 0,
+            tx_ready_at: None,
         }
     }
 
@@ -226,6 +230,44 @@ impl BmNetworkPacket {
     pub const fn with_rssi(mut self, rssi: RssiType) -> Self {
         self.rx_rssi = rssi;
         self
+    }
+
+    pub const fn with_tx_ready_at(mut self, ready_at: TimeType) -> Self {
+        self.tx_ready_at = Some(ready_at);
+        self
+    }
+
+    pub fn set_tx_ready_at(&mut self, ready_at: Option<TimeType>) {
+        self.tx_ready_at = ready_at;
+    }
+
+    pub fn set_tx_delay(&mut self, delay: TimeType, now: TimeType) {
+        self.tx_ready_at = Some(now + delay);
+    }
+
+    pub fn with_tx_delay(mut self, delay: TimeType, now: TimeType) -> Self {
+        self.tx_ready_at = Some(now + delay);
+        self
+    }
+
+    pub fn get_tx_delay(&self) -> Option<TimeType> {
+        self.tx_ready_at
+    }
+
+    pub fn get_tx_ready_at(&self) -> Option<TimeType> {
+        self.tx_ready_at
+    }
+
+    pub fn tx_ready_at(&self) -> Option<TimeType> {
+        self.tx_ready_at
+    }
+
+    pub fn is_ready_to_transmit(&self, now: TimeType) -> bool {
+        self.tx_ready_at.map_or(true, |t| now >= t)
+    }
+
+    pub fn tx_delay_millis(&self, now: TimeType) -> Option<TimeType> {
+        self.tx_ready_at.map(|t| (t - now).max(0))
     }
 
     // Public accessor functions
@@ -327,6 +369,7 @@ impl BmNetworkPacket {
                 tx_count: 0,
                 wait_for_reply: false,
                 rx_rssi: 0,
+                tx_ready_at: None,
             }
         )
     }

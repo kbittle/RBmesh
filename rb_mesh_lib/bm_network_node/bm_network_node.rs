@@ -277,4 +277,4 @@ fn calc_route_metric(route: &BmRoute, newest: i64) -> i32 {
     metric += (age / 100) as i32;
 
     metric
-}
+}

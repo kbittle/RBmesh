@@ -33,4 +33,4 @@ impl RadioRxBuffer {
             rssi: rssi,
         }
     }
-}
+}

@@ -346,7 +346,7 @@ mod app {
                 }
 
                 // Print +Searching for route when a discovery packet is queued and not yet transmitted
-                if let Some(pkt) = mesh_inst.get_next_outbound_packet() {
+                if let Some(pkt) = mesh_inst.get_next_outbound_packet(current_millis) {
                     if pkt.packet_type == BmPacketTypes::RouteDiscoveryRequest && pkt.tx_complete_timestamp.is_none() {
                         write_str_uart1(uart1, "\n\r+Searching for route");
                     }
@@ -354,8 +354,9 @@ mod app {
             });                
 
             // Peek at outbound queue of mesh stack
+            let current_millis_peek = ctx.shared.rtc.lock(|rtc| unwrap!(rtc.date_time()).and_utc().timestamp_millis());
             ctx.shared.mesh_inst.lock(|mesh_inst| {
-                *ctx.local.outbound_buff_avail = mesh_inst.get_next_outbound_packet().is_some();
+                *ctx.local.outbound_buff_avail = mesh_inst.get_next_outbound_packet(current_millis_peek).is_some();
             });
 
             // If we have a packet to send in the mesh stack
@@ -373,8 +374,9 @@ mod app {
                 }
 
                 // Prepare and send packet to radio
+                let current_millis_tx = ctx.shared.rtc.lock(|rtc| unwrap!(rtc.date_time()).and_utc().timestamp_millis());
                 ctx.shared.mesh_inst.lock(|mesh_inst| {
-                    if let Some(outbound_packet) = mesh_inst.get_next_outbound_packet() {
+                    if let Some(outbound_packet) = mesh_inst.get_next_outbound_packet(current_millis_tx) {
                         if let Some(outbound_packet_bytes) = outbound_packet.clone().to_bytes() {
                             let length_to_send = outbound_packet_bytes.len().try_into().unwrap();
                             defmt::info!("mesh_task: initiate tx len={}", length_to_send);
