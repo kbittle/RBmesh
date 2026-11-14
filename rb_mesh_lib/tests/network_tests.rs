@@ -47,7 +47,7 @@ fn test_route_discovery_and_packet_completion_flow() {
     assert_eq!(status, BmEngineStatus::PerformingNetworkDiscovery);
 
     // Verify a RouteDiscoveryRequest is ready to transmit
-    let discovery_pkt = engine.get_next_outbound_packet().expect("Expected outbound discovery packet");
+    let discovery_pkt = engine.get_next_outbound_packet(10000).expect("Expected outbound discovery packet");
     
     // Evaluate dest before referencing packet_type immutably
     let dest = discovery_pkt.get_destination();
@@ -100,7 +100,7 @@ fn test_route_discovery_and_packet_completion_flow() {
     println!("[STATE] Engine Status: {:?}", status);
     assert_eq!(status, BmEngineStatus::SendingPayload);
 
-    let data_pkt = engine.get_next_outbound_packet().expect("Expected outbound data packet");
+    let data_pkt = engine.get_next_outbound_packet(10000).expect("Expected outbound data packet");
     
     // Evaluate next_hop before referencing packet_type immutably
     let next_hop_val = data_pkt.get_next_hop();
@@ -197,7 +197,7 @@ fn test_packet_routing() {
 
     // Get Node 1's broadcast discovery request
     let node1_disc_pkt = engine_node1
-        .get_next_outbound_packet()
+        .get_next_outbound_packet(10000)
         .expect("Node 1 should have an outbound discovery request");
     
     assert_eq!(node1_disc_pkt.packet_type, BmPacketTypes::RouteDiscoveryRequest);
@@ -215,7 +215,7 @@ fn test_packet_routing() {
 
     // Pop the forwarded packet using get_next_outbound_packet
     let node2_fwd_pkt = engine_node2
-        .get_next_outbound_packet()
+        .get_next_outbound_packet(10000)
         .expect("Node 2 should have queued a forwarded packet");
 
     // Check that Node 2 updated headers (hop count incremented, src set to Node 2)
@@ -240,7 +240,7 @@ fn test_packet_routing() {
 
     // Verify Node 3 created an outbound RouteDiscoveryResponse packet
     let node3_resp_pkt = engine_node3
-        .get_next_outbound_packet()
+        .get_next_outbound_packet(10000)
         .expect("Node 3 should have an outbound discovery response");
 
     assert_eq!(node3_resp_pkt.packet_type, BmPacketTypes::RouteDiscoveryResponse);
@@ -259,7 +259,7 @@ fn test_packet_routing() {
     assert!(processed_at_node2_resp.is_some());
 
     let node2_fwd_resp = engine_node2
-        .get_next_outbound_packet()
+        .get_next_outbound_packet(10000)
         .expect("Node 2 should have queued forwarded response");
     assert_eq!(node2_fwd_resp.get_next_hop(), node1_id);
 
@@ -281,7 +281,7 @@ fn test_packet_routing() {
     assert_eq!(engine_node1.run_engine(500), BmEngineStatus::SendingPayload);
 
     let data_pkt = engine_node1
-        .get_next_outbound_packet()
+        .get_next_outbound_packet(10000)
         .expect("Node 1 should have a queued DataPayload packet");
 
     assert_eq!(data_pkt.packet_type, BmPacketTypes::DataPayload);
@@ -299,10 +299,63 @@ fn test_packet_routing() {
     let _ = engine_node2.process_packet(len, &mut data_bytes, 600, -60);
 
     let fwd_data_pkt = engine_node2
-        .get_next_outbound_packet()
+        .get_next_outbound_packet(10000)
         .expect("Node 2 should have queued forwarded DataPayload");
     assert_eq!(fwd_data_pkt.packet_type, BmPacketTypes::DataPayload);
     assert_eq!(fwd_data_pkt.get_destination(), node3_id);
 
     println!("\n=== END: Multi-Hop Routing Test Passed! ===");
+}
+
+#[test]
+fn test_periodic_neighbor_table_transmit() {
+    let mut engine = BmNetworkEngine::new(Some(1));
+    engine.table.update_node_route(Some(2), Some(2), 0, 0, -50);
+    engine.table.update_node_route(Some(3), Some(3), 0, 0, -60);
+    engine.table.update_node_route(Some(4), Some(4), 0, 0, -70);
+    engine.table.update_node_route(Some(5), Some(5), 0, 0, -40);
+
+    // No periodic transmit before the configured period elapses.
+    engine.run_engine(0);
+    assert!(engine.get_next_outbound_packet(0).is_none());
+
+    // After 2 minutes a neighbor table packet is queued.
+    engine.run_engine(120_000);
+    let mut pkt = engine.get_next_outbound_packet(120_000).expect("expected neighbor table packet");
+    assert_eq!(pkt.packet_type, BmPacketTypes::BcastNeighborTable);
+    assert_eq!(pkt.get_payload_len(), 12);
+
+    // Only the 3 closest (highest RSSI) neighbors are included.
+    let bytes = pkt.to_bytes().expect("serialization failed");
+    let payload = &bytes[18..];
+    assert_eq!(u32::from_ne_bytes(payload[0..4].try_into().unwrap()), 5);
+    assert_eq!(u32::from_ne_bytes(payload[4..8].try_into().unwrap()), 2);
+    assert_eq!(u32::from_ne_bytes(payload[8..12].try_into().unwrap()), 3);
+}
+
+#[test]
+fn test_neighbor_table_receive_updates_routing_table() {
+    let mut sender = BmNetworkEngine::new(Some(1));
+    sender.table.update_node_route(Some(2), Some(2), 0, 0, -50);
+    sender.table.update_node_route(Some(3), Some(3), 0, 0, -60);
+    assert!(sender.queue_neighbor_table_tx(0));
+
+    let mut pkt = sender.get_next_outbound_packet(0).unwrap().clone();
+    let mut bytes = pkt.to_bytes().expect("serialization failed");
+    let len = bytes.len();
+
+    let mut recv = BmNetworkEngine::new(Some(9));
+    // Pre-existing (worse) route to node 2 via node 99.
+    recv.table.update_node_route(Some(2), Some(99), 5, 0, -100);
+
+    let processed = recv.process_packet(len, &mut bytes, 100, -70);
+    assert!(processed.is_some());
+
+    // Neighbor tables are not rebroadcast.
+    assert!(recv.get_next_outbound_packet(0).is_none());
+
+    // Routing table is updated with originator and advertised neighbors.
+    assert_eq!(recv.table.get_next_hop(Some(1)), Some(1));
+    assert_eq!(recv.table.get_next_hop(Some(2)), Some(1));
+    assert_eq!(recv.table.get_next_hop(Some(3)), Some(1));
 }

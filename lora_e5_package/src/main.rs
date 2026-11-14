@@ -26,12 +26,12 @@ use heapless::String; // fixed capacity `std::Vec`
 use bm_network::{
     bm_network_engine::BmNetworkEngine,
     bm_network_engine::BmEngineStatus,
+    bm_network_packet::bm_network_packet::BmPacketTypes,
 };
 mod at_command;
 use at_command::{
     command_set::{
         AtCommandSet,
-        AtCmdStr,
     },
     parser::{CommandParser, MessageTuple},    
 };
@@ -46,7 +46,7 @@ systick_monotonic!(Mono, 1000);
 
 #[app(device = stm32wlxx_hal::pac, peripherals = true, dispatchers = [USART1])]
 mod app {
-    use at_command::{parser, response::ResponseGenerator};
+    use at_command::{response::ResponseGenerator};
     use bm_network::BmError;
 
     use super::*;
@@ -66,6 +66,8 @@ mod app {
         ring_indicator: Output<pins::C0>,
         tx_indicator: Output<pins::C1>,
         rx_indicator: Output<pins::B5>,
+        tx_led_timer: u32,
+        rx_led_timer: u32,
 
         // At Cmd task
         at_cmd_parser_inst: CommandParser,
@@ -136,9 +138,22 @@ mod app {
         let mut led1: Output<pins::C0> = Output::default(gpioc.c0, cs);
         let mut led2: Output<pins::C1> = Output::default(gpioc.c1, cs);
         let mut led3: Output<pins::B5> = Output::default(gpiob.b5, cs);
-        led1.set_level(PinState::High);        
-        led2.set_level(PinState::High);
-        led3.set_level(PinState::High);
+        led1.set_level(PinState::Low);        
+        led2.set_level(PinState::Low);
+        led3.set_level(PinState::Low);
+
+        // Startup LED sequence (TX and RX only)
+        let delay_cycles = 48_000_000 / 10; // ~100ms at 48MHz
+        let delay_long = 48_000_000 / 5;   // ~200ms
+        
+        for _ in 0..2 {
+            led2.set_level_high(); cortex_m::asm::delay(delay_cycles); led2.set_level_low(); cortex_m::asm::delay(delay_cycles);
+            led3.set_level_high(); cortex_m::asm::delay(delay_cycles); led3.set_level_low(); cortex_m::asm::delay(delay_cycles);
+        }
+        // All on briefly
+        led2.set_level_high(); led3.set_level_high();
+        cortex_m::asm::delay(delay_long);
+        led2.set_level_low(); led3.set_level_low();
 
         // Setup uart1
         let mut uart1: Uart1<pins::B7, pins::B6> =
@@ -192,6 +207,8 @@ mod app {
                 ring_indicator: led1,
                 tx_indicator: led2,
                 rx_indicator: led3,
+                tx_led_timer: 0,
+                rx_led_timer: 0,
                 at_cmd_parser_inst,
                 at_resp_gen_inst,
                 received_cmd: None,
@@ -205,13 +222,15 @@ mod app {
     // LED task will poll all other instances for data needed to iluminate the LED's
     #[task(
         shared = [radio_inst, mesh_inst],
-        local = [ring_indicator, tx_indicator, rx_indicator],
+        local = [ring_indicator, tx_indicator, rx_indicator, tx_led_timer, rx_led_timer],
         priority = 2,
     )]
     async fn led_task(mut ctx: led_task::Context) {
+        const LED_MIN_BLINK_MS: u32 = 100;
+        const POLL_INTERVAL_MS: u32 = 20;
+        
         loop {
             ctx.shared.mesh_inst.lock(|mesh_inst| {
-                // Illuminate ring indicator when there is a message waiting for us
                 let msg_cnt = mesh_inst.get_inbound_message_count() as u32;
                 if msg_cnt > 0 {
                     ctx.local.ring_indicator.set_level_high();
@@ -222,23 +241,32 @@ mod app {
             });
 
             ctx.shared.radio_inst.lock(|radio_inst| {
-                // poll radio inst for tx/rx state
-                // TODO - this may not work as we are only checking every 100ms
-                //   and it could be blocked by IRQ handler??
                 match radio_inst.current_state {
                     RadioState::Transmitting => {
                         ctx.local.tx_indicator.set_level_high();
+                        *ctx.local.tx_led_timer = LED_MIN_BLINK_MS;
                     }
                     RadioState::Receiving => {
                         ctx.local.rx_indicator.set_level_high();
+                        *ctx.local.rx_led_timer = LED_MIN_BLINK_MS;
                     }                    
                     _ => {
-                        ctx.local.tx_indicator.set_level_low();
-                        ctx.local.rx_indicator.set_level_low();
+                        if *ctx.local.tx_led_timer > 0 {
+                            *ctx.local.tx_led_timer = ctx.local.tx_led_timer.saturating_sub(POLL_INTERVAL_MS);
+                            if *ctx.local.tx_led_timer == 0 {
+                                ctx.local.tx_indicator.set_level_low();
+                            }
+                        }
+                        if *ctx.local.rx_led_timer > 0 {
+                            *ctx.local.rx_led_timer = ctx.local.rx_led_timer.saturating_sub(POLL_INTERVAL_MS);
+                            if *ctx.local.rx_led_timer == 0 {
+                                ctx.local.rx_indicator.set_level_low();
+                            }
+                        }
                     }
                 }
             });
-            Mono::delay(100.millis()).await;
+            Mono::delay(POLL_INTERVAL_MS.millis()).await;
         }
     }
 
@@ -294,7 +322,6 @@ mod app {
                     // Update UI when we have updates from mesh engine
                     match *ctx.local.status {
                         BmEngineStatus::PerformingNetworkDiscovery => {
-                            write_str_uart1(uart1, "\n\r+Searching for route");
                         }
                         BmEngineStatus::RouteFound => {
                             write_str_uart1(uart1, "\n\r+Found route");
@@ -317,11 +344,19 @@ mod app {
                         _ => { }
                     }
                 }
+
+                // Print +Searching for route when a discovery packet is queued and not yet transmitted
+                if let Some(pkt) = mesh_inst.get_next_outbound_packet(current_millis) {
+                    if pkt.packet_type == BmPacketTypes::RouteDiscoveryRequest && pkt.tx_complete_timestamp.is_none() {
+                        write_str_uart1(uart1, "\n\r+Searching for route");
+                    }
+                }
             });                
 
             // Peek at outbound queue of mesh stack
+            let current_millis_peek = ctx.shared.rtc.lock(|rtc| unwrap!(rtc.date_time()).and_utc().timestamp_millis());
             ctx.shared.mesh_inst.lock(|mesh_inst| {
-                *ctx.local.outbound_buff_avail = mesh_inst.get_next_outbound_packet().is_some();
+                *ctx.local.outbound_buff_avail = mesh_inst.get_next_outbound_packet(current_millis_peek).is_some();
             });
 
             // If we have a packet to send in the mesh stack
@@ -339,8 +374,9 @@ mod app {
                 }
 
                 // Prepare and send packet to radio
+                let current_millis_tx = ctx.shared.rtc.lock(|rtc| unwrap!(rtc.date_time()).and_utc().timestamp_millis());
                 ctx.shared.mesh_inst.lock(|mesh_inst| {
-                    if let Some(outbound_packet) = mesh_inst.get_next_outbound_packet() {
+                    if let Some(outbound_packet) = mesh_inst.get_next_outbound_packet(current_millis_tx) {
                         if let Some(outbound_packet_bytes) = outbound_packet.clone().to_bytes() {
                             let length_to_send = outbound_packet_bytes.len().try_into().unwrap();
                             defmt::info!("mesh_task: initiate tx len={}", length_to_send);
@@ -447,10 +483,11 @@ mod app {
                                     &mut ctx.shared.mesh_inst
                                 ).lock(|mesh_inst| {                        
                                     // Send ID response
+                                    let network_id = mesh_inst.table.get_local_network_id().unwrap_or(0);
                                     write_slice_uart1(uart1, 
                                         ctx.local.at_resp_gen_inst.fmt_resp_uint_as_str_slice(
                                             rx_cmd_enum, 
-                                            mesh_inst.table.get_local_network_id().unwrap(),
+                                            network_id,
                                         )
                                     );
                                 });                            
@@ -485,9 +522,7 @@ mod app {
                                 });
                             }
                             AtCommandSet::AtMsgSend => {
-                                // Parse argument String buffer into tuple
-                                // TODO - consolodate cmd_arg_into_msg to at_cmd_parser_inst.into_msg()
-                                let msg_cmd: Option<MessageTuple> = parser::cmd_arg_into_msg(ctx.local.at_cmd_parser_inst.get_cmd_arg());
+                                let msg_cmd: Option<MessageTuple> = ctx.local.at_cmd_parser_inst.into_msg();
 
                                 if let Some((network_id, ack_required, ttl, payload)) = msg_cmd {
                                     defmt::info!("AtMsgSend: id:{} ack:{} ttl:{} payload_len:{}", 
@@ -500,7 +535,7 @@ mod app {
                                             write_str_uart1(uart1, "\n\rMesh Engine Error\n\r>");
                                         }
                                     });
-                    
+                     
                                     // Do not print Ok response here. Mesh engine state machine will drive UI responses 
                                 }
                                 else {
@@ -522,41 +557,203 @@ mod app {
                                     );
                                 });                            
                             }
-                            AtCommandSet::RoutingTable => {
-                                (
-                                    &mut ctx.shared.mesh_inst,
-                                ).lock(|mesh_inst| {
-                                    // Prints out 1 line per node in table.
-                                    // Note: May need to refactor this when we support more nodes.
-                                    let num_nodes = mesh_inst.table.get_num_nodes();
-                                    if num_nodes > 0 {
-                                        for node_idx in 0..num_nodes {
-                                            if let Some(node_data) = mesh_inst.table.get_node_by_idx(node_idx) {                                                
-                                                write_slice_uart1(uart1, 
-                                                    ctx.local.at_resp_gen_inst.fmt_resp_node_as_str_slice(node_data)
-                                                );
-                                            }
-                                        }
-                                    }
-                                    else {
-                                        write_str_uart1(uart1, "\n\r0 Nodes");
-                                    }
-                                    write_str_uart1(uart1, "\n\rOk\n\r>");
-                                });
-                            }
-                            AtCommandSet::RadioStatus => {
+                            AtCommandSet::AtFreq => {
                                 (
                                     &mut ctx.shared.radio_inst
                                 ).lock(|radio_inst| {
-                                    // Print radio status response
+                                    let resp = if let Some(arg) = ctx.local.at_cmd_parser_inst.get_cmd_arg_as_u32() {
+                                        match radio_inst.set_frequency(arg) {
+                                            Ok(v) => v,
+                                            Err(e) => { defmt::error!("set_frequency error: {}", e); String::try_from("Error").unwrap() }
+                                        }
+                                    } else {
+                                        radio_inst.get_frequency()
+                                    };
                                     write_slice_uart1(uart1, 
                                         ctx.local.at_resp_gen_inst.fmt_resp_str_as_str_slice(
                                             rx_cmd_enum, 
-                                            radio_inst.get_status().trim()
+                                            resp.trim()
                                         )
                                     );
                                 });
+                            }
+                            AtCommandSet::AtPwr => {
+                                (
+                                    &mut ctx.shared.radio_inst
+                                ).lock(|radio_inst| {
+                                    let resp = if let Some(arg) = ctx.local.at_cmd_parser_inst.get_cmd_arg_as_u32() {
+                                        match radio_inst.set_tx_power(arg) {
+                                            Ok(v) => v,
+                                            Err(e) => { defmt::error!("set_tx_power error: {}", e); String::try_from("Error").unwrap() }
+                                        }
+                                    } else {
+                                        radio_inst.get_tx_power()
+                                    };
+                                    write_slice_uart1(uart1, 
+                                        ctx.local.at_resp_gen_inst.fmt_resp_str_as_str_slice(
+                                            rx_cmd_enum, 
+                                            resp.trim()
+                                        )
+                                    );
+                                });
+                            }
+                            AtCommandSet::AtVer => {
+                                (
+                                    &mut ctx.shared.radio_inst
+                                ).lock(|radio_inst| {
+                                    let resp = radio_inst.get_version();
+                                    write_slice_uart1(uart1, 
+                                        ctx.local.at_resp_gen_inst.fmt_resp_str_as_str_slice(
+                                            rx_cmd_enum, 
+                                            resp.trim()
+                                        )
+                                    );
+                                });
+                            }
+                            AtCommandSet::AtRoutes => {
+                                let mut num_nodes: usize = 0;
+                                let mut node_data_list: heapless::Vec<bm_network::bm_network_node::bm_network_node::BmNodeEntry, 16> = heapless::Vec::new();
+                                
+                                (
+                                    &mut ctx.shared.mesh_inst,
+                                ).lock(|mesh_inst| {
+                                    num_nodes = mesh_inst.table.get_num_nodes();
+                                    if num_nodes > 0 {
+                                        for node_idx in 0..num_nodes {
+                                            if let Some(node_data) = mesh_inst.table.get_node_by_idx(node_idx) {
+                                                node_data_list.push(node_data.clone()).ok();
+                                            }
+                                        }
+                                    }
+                                });
+                                
+                                if num_nodes > 0 {
+                                    for node_data in &node_data_list {
+                                        write_slice_uart1(uart1, 
+                                            ctx.local.at_resp_gen_inst.fmt_resp_peer_as_str_slice(node_data)
+                                        );
+                                    }
+                                }
+                                else {
+                                    write_str_uart1(uart1, "\n\r0 Routes");
+                                }
+                                write_str_uart1(uart1, "\n\rOk\n\r>");
+                            }
+                            AtCommandSet::AtBw => {
+                                (
+                                    &mut ctx.shared.radio_inst
+                                ).lock(|radio_inst| {
+                                    let resp = if let Some(arg) = ctx.local.at_cmd_parser_inst.get_cmd_arg_as_u32() {
+                                        match radio_inst.set_bandwidth(arg) {
+                                            Ok(v) => v,
+                                            Err(e) => { defmt::error!("set_bandwidth error: {}", e); String::try_from("Error").unwrap() }
+                                        }
+                                    } else {
+                                        radio_inst.get_bandwidth()
+                                    };
+                                    write_slice_uart1(uart1, 
+                                        ctx.local.at_resp_gen_inst.fmt_resp_str_as_str_slice(
+                                            rx_cmd_enum, 
+                                            resp.trim()
+                                        )
+                                    );
+                                });
+                            }
+                            AtCommandSet::AtCr => {
+                                (
+                                    &mut ctx.shared.radio_inst
+                                ).lock(|radio_inst| {
+                                    let resp = if let Some(arg) = ctx.local.at_cmd_parser_inst.get_cmd_arg_as_u32() {
+                                        match radio_inst.set_coding_rate(arg) {
+                                            Ok(v) => v,
+                                            Err(e) => { defmt::error!("set_coding_rate error: {}", e); String::try_from("Error").unwrap() }
+                                        }
+                                    } else {
+                                        radio_inst.get_coding_rate()
+                                    };
+                                    write_slice_uart1(uart1, 
+                                        ctx.local.at_resp_gen_inst.fmt_resp_str_as_str_slice(
+                                            rx_cmd_enum, 
+                                            resp.trim()
+                                        )
+                                    );
+                                });
+                            }
+                            AtCommandSet::AtRoutes => {
+                                let mut num_nodes: usize = 0;
+                                let mut node_data_list: heapless::Vec<bm_network::bm_network_node::bm_network_node::BmNodeEntry, 16> = heapless::Vec::new();
+                                
+                                (
+                                    &mut ctx.shared.mesh_inst,
+                                ).lock(|mesh_inst| {
+                                    num_nodes = mesh_inst.table.get_num_nodes();
+                                    if num_nodes > 0 {
+                                        for node_idx in 0..num_nodes {
+                                            if let Some(node_data) = mesh_inst.table.get_node_by_idx(node_idx) {
+                                                node_data_list.push(node_data.clone()).ok();
+                                            }
+                                        }
+                                    }
+                                });
+                                
+                                // Prints out 1 line per node in table.
+                                // Note: May need to refactor this when we support more nodes.
+                                if num_nodes > 0 {
+                                    for node_data in &node_data_list {
+                                        write_slice_uart1(uart1, 
+                                            ctx.local.at_resp_gen_inst.fmt_resp_node_as_str_slice(node_data)
+                                        );
+                                    }
+                                }
+                                else {
+                                    write_str_uart1(uart1, "\n\r0 Nodes");
+                                }
+                                write_str_uart1(uart1, "\n\rOk\n\r>");
+                            }
+                            AtCommandSet::AtSt => {
+                                let mut status_str: String<100> = String::new();
+                                (
+                                    &mut ctx.shared.radio_inst
+                                ).lock(|radio_inst| {
+                                    let s = radio_inst.get_status();
+                                    status_str = s.trim().try_into().unwrap_or_else(|_| String::try_from("Error").unwrap());
+                                });
+                                write_slice_uart1(uart1, 
+                                    ctx.local.at_resp_gen_inst.fmt_resp_str_as_str_slice(
+                                        rx_cmd_enum, 
+                                        status_str.trim()
+                                    )
+                                );
                             }                
+                            AtCommandSet::AtNodes => {
+                                let mut num_nodes: usize = 0;
+                                let mut node_data_list: heapless::Vec<bm_network::bm_network_node::bm_network_node::BmNodeEntry, 16> = heapless::Vec::new();
+                                
+                                (
+                                    &mut ctx.shared.mesh_inst,
+                                ).lock(|mesh_inst| {
+                                    num_nodes = mesh_inst.table.get_num_nodes();
+                                    if num_nodes > 0 {
+                                        for node_idx in 0..num_nodes {
+                                            if let Some(node_data) = mesh_inst.table.get_node_by_idx(node_idx) {
+                                                node_data_list.push(node_data.clone()).ok();
+                                            }
+                                        }
+                                    }
+                                });
+                                
+                                if num_nodes > 0 {
+                                    for node_data in &node_data_list {
+                                        write_slice_uart1(uart1, 
+                                            ctx.local.at_resp_gen_inst.fmt_resp_peer_as_str_slice(node_data)
+                                        );
+                                    }
+                                }
+                                else {
+                                    write_str_uart1(uart1, "\n\r0 Nodes");
+                                }
+                                write_str_uart1(uart1, "\n\rOk\n\r>");
+                            }
                             AtCommandSet::AtList => {                                
                                 write_slice_uart1(uart1, 
                                     ctx.local.at_resp_gen_inst.get_available_cmds()
@@ -575,8 +772,10 @@ mod app {
                         }
                     }
 
-                    // Echo entered characters
-                    write_u8_uart1(uart1, in_char);                    
+                    // Echo entered characters (skip control chars \r \n)
+                    if in_char != 0x0D && in_char != 0x0A {
+                        write_u8_uart1(uart1, in_char);                    
+                    }
                 }                
             });            
             

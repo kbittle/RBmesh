@@ -63,20 +63,30 @@ impl BmNetworkRoutingTable {
         }
     }
 
-    pub fn get_next_hop(&mut self, dest_id: NetworkId) -> NetworkId {
-        // Search through node list for dest node
+    pub fn set_node_success(&mut self, dest_id: NetworkId) {
         if let Some(node_entry) = self.find_node_by_id(dest_id) {
-            // Get best route
-            if let Some(mut route) = node_entry.get_best_route() {                
-                // Return network id
-                return route.get_next_hop()
+            node_entry.record_success();
+        }
+    }
+
+    pub fn get_next_hop(&self, dest_id: NetworkId) -> NetworkId {
+        // Search through node list for dest node
+        for node_entry in &self.nodes {
+            if node_entry.dest_id == dest_id {
+                // Get best route
+                if let Some(route) = node_entry.get_best_route() {
+                    // Return network id
+                    return route.get_next_hop()
+                }
             }
         }
         None
     }
 
     pub fn add_node(&mut self, new_node: BmNodeEntry) {
-        self.nodes.push(new_node).unwrap();
+        if self.nodes.push(new_node).is_err() {
+            defmt::error!("add_node: routing table full");
+        }
     }
 
     pub fn get_num_nodes(&mut self) -> usize {
@@ -85,6 +95,41 @@ impl BmNetworkRoutingTable {
 
     pub fn get_node_by_idx(&mut self, index: usize) -> Option<&mut BmNodeEntry> {
         self.nodes.get_mut(index)
+    }
+
+    // Return up to `count` closest neighbors (by best route distance, then RSSI).
+    pub fn get_closest_neighbors(&self, count: usize) -> Vec<NetworkId, BM_MAX_NET_DEVICES> {
+        let mut entries: Vec<(u8, i32, NetworkId), BM_MAX_NET_DEVICES> = Vec::new();
+        for node in &self.nodes {
+            if let Some(route) = node.get_best_route() {
+                if node.dest_id.is_some() {
+                    let _ = entries.push((route.distance(), route.avg_rssi(), node.dest_id));
+                }
+            }
+        }
+        // Manual insertion sort (no_std friendly)
+        for i in 1..entries.len() {
+            let mut j = i;
+            while j > 0 {
+                let cmp = entries[j-1].0.cmp(&entries[j].0)
+                    .then(entries[j].1.cmp(&entries[j-1].1));
+                if cmp == core::cmp::Ordering::Greater {
+                    entries.swap(j-1, j);
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        let mut result: Vec<NetworkId, BM_MAX_NET_DEVICES> = Vec::new();
+        for (_, _, id) in entries.iter().take(count) {
+            let _ = result.push(*id);
+        }
+        result
+    }
+
+    pub fn get_three_closest_neighbors(&self) -> Vec<NetworkId, BM_MAX_NET_DEVICES> {
+        self.get_closest_neighbors(BM_NEIGHBOR_TABLE_MAX_NEIGHBORS)
     }
 
     //-----------------------------------------------------------

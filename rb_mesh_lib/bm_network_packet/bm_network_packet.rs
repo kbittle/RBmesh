@@ -4,6 +4,7 @@ use crate::RssiType;
 
 use super::super::{
     NetworkId, 
+    TimeType,
     bm_network_configs::*,
 };
 use core::fmt::{self};
@@ -13,8 +14,18 @@ pub type BmNetworkOtaPacket = Vec<u8, BM_MAX_OTA_SIZE>;
 // Vec type with just the size3 of the payload
 pub type BmNetworkPacketPayload = Vec<u8, BM_MAX_PAYLOAD_SIZE>;
 
-// Max TTL and hop count value
-const MAX_TTL_HOP_CNT: u8 = 7;
+// Max TTL and hop count value (3 bits in bitfield)
+pub const MAX_TTL_HOP_CNT: u8 = 7;
+
+/// Clamps TTL to valid range (0-7) and logs warning if out of bounds
+fn clamp_ttl(ttl: u8) -> u8 {
+    if ttl > MAX_TTL_HOP_CNT {
+        defmt::warn!("TTL {} exceeds max {}, clamping", ttl, MAX_TTL_HOP_CNT);
+        MAX_TTL_HOP_CNT
+    } else {
+        ttl
+    }
+}
 
 #[repr(u8)]
 #[derive(Default, Clone, Debug, PartialEq)]
@@ -165,6 +176,8 @@ pub struct BmNetworkPacket {
     pub tx_count: u8,
     pub wait_for_reply: bool,
     pub rx_rssi: RssiType,
+    // Earliest time (ms) at which this packet may be transmitted. None => immediate.
+    pub tx_ready_at: Option<TimeType>,
 }
 
 impl fmt::Display for BmNetworkPacket {
@@ -181,6 +194,7 @@ impl fmt::Display for BmNetworkPacket {
 impl BmNetworkPacket {
     // Constructor
     pub fn new(new_packet_type: BmPacketTypes, orig: NetworkId, next_hop: NetworkId, dest: NetworkId, ttl: u8, ack: bool, new_payload: Option<BmNetworkPacketPayload>) -> Self {
+        let ttl = clamp_ttl(ttl);
         BmNetworkPacket {
             packet_type: new_packet_type,
             routing_hdr: BmNetworkRoutingHdr::new(ttl, ack)
@@ -194,6 +208,7 @@ impl BmNetworkPacket {
             tx_count: 0,
             wait_for_reply: false,
             rx_rssi: 0,
+            tx_ready_at: None,
         }
     }
 
@@ -215,6 +230,44 @@ impl BmNetworkPacket {
     pub const fn with_rssi(mut self, rssi: RssiType) -> Self {
         self.rx_rssi = rssi;
         self
+    }
+
+    pub const fn with_tx_ready_at(mut self, ready_at: TimeType) -> Self {
+        self.tx_ready_at = Some(ready_at);
+        self
+    }
+
+    pub fn set_tx_ready_at(&mut self, ready_at: Option<TimeType>) {
+        self.tx_ready_at = ready_at;
+    }
+
+    pub fn set_tx_delay(&mut self, delay: TimeType, now: TimeType) {
+        self.tx_ready_at = Some(now + delay);
+    }
+
+    pub fn with_tx_delay(mut self, delay: TimeType, now: TimeType) -> Self {
+        self.tx_ready_at = Some(now + delay);
+        self
+    }
+
+    pub fn get_tx_delay(&self) -> Option<TimeType> {
+        self.tx_ready_at
+    }
+
+    pub fn get_tx_ready_at(&self) -> Option<TimeType> {
+        self.tx_ready_at
+    }
+
+    pub fn tx_ready_at(&self) -> Option<TimeType> {
+        self.tx_ready_at
+    }
+
+    pub fn is_ready_to_transmit(&self, now: TimeType) -> bool {
+        self.tx_ready_at.map_or(true, |t| now >= t)
+    }
+
+    pub fn tx_delay_millis(&self, now: TimeType) -> Option<TimeType> {
+        self.tx_ready_at.map(|t| (t - now).max(0))
     }
 
     // Public accessor functions
@@ -252,6 +305,11 @@ impl BmNetworkPacket {
             self.routing_hdr.info.set_hop_count(hop_cnt + 1);
         }
         
+    }
+
+    #[cfg(test)]
+    pub fn set_hop_count(&mut self, hop_count: u8) {
+        self.routing_hdr.info.set_hop_count(hop_count);
     }
     pub fn get_payload_len(&mut self) -> usize {
         if let Some(packet_payload) = &self.payload {
@@ -311,6 +369,7 @@ impl BmNetworkPacket {
                 tx_count: 0,
                 wait_for_reply: false,
                 rx_rssi: 0,
+                tx_ready_at: None,
             }
         )
     }
@@ -326,10 +385,10 @@ impl BmNetworkPacket {
         if out_buffer.extend_from_slice(&self.routing_hdr.orig.unwrap_or(0).to_ne_bytes()).is_err() { return None; }
         if out_buffer.push(self.routing_hdr.info.into()).is_err() { return None; }
 
-        // If there is a payload, oush bytes
+        // If there is a payload, push bytes
         if let Some(payload) = self.payload.as_ref() {        
-            for &payload_byte in payload.iter() {
-                out_buffer.push(payload_byte).unwrap();
+            if out_buffer.extend_from_slice(payload).is_err() {
+                return None;
             }
         }
 

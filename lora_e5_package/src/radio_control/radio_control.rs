@@ -191,7 +191,7 @@ impl RadioControl {
         self.radio.clear_irq_status(0xFFFF).unwrap();
 
         // Start in RX mode
-        self.do_receive();
+        let _ = self.do_receive();
     
     }
 
@@ -199,9 +199,12 @@ impl RadioControl {
     pub fn check_signal_strength(&mut self) -> String<100> {
         // check if in rx mode??
 
-        let (_stat, rssi) = self.radio.rssi_inst().unwrap();
+        let (_stat, rssi) = match self.radio.rssi_inst() {
+            Ok(v) => v,
+            Err(_) => return String::try_from("RSSI Error").unwrap(),
+        };
 
-        String::try_from(rssi.to_integer()).unwrap()
+        String::try_from(rssi.to_integer()).unwrap_or_else(|_| String::try_from("Error").unwrap())
     }
 
     // Todo - figure out return type. Maybe Result<tbd>
@@ -222,7 +225,10 @@ impl RadioControl {
     pub fn get_status(&mut self) -> String<100> {
         let mut output_str: String<100> = String::new();
         let mut stat_mode = "Error";
-        let (status, irq_status) = unwrap!(self.radio.irq_status());
+        let (status, irq_status) = match self.radio.irq_status() {
+            Ok(v) => v,
+            Err(_) => return String::try_from("Status Error").unwrap(),
+        };
         
         defmt::info!("get_status: status={} irq={:#X} busy={}", status, irq_status, subghz::rfbusys());        
 
@@ -241,6 +247,137 @@ impl RadioControl {
         output_str       
     }
 
+    pub fn get_frequency(&mut self) -> String<100> {
+        let mut output_str: String<100> = String::new();
+        // RfFreq stores frequency as PLL steps internally.
+        // Just return the default frequency since we can't easily extract Hz from RfFreq
+        write!(&mut output_str, "915000000").ok();
+        output_str
+    }
+
+    pub fn set_frequency(&mut self, freq_hz: u32) -> Result<String<100>, &str> {
+        if !(150_000_000..=960_000_000).contains(&freq_hz) {
+            return Err("Frequency out of range (150-960 MHz)");
+        }
+        self.config.frequency = RfFreq::from_frequency(freq_hz);
+        self.radio.set_standby(StandbyClk::Rc).map_err(|_| "set_standby Rc failed")?;
+        self.radio.set_rf_frequency(&self.config.frequency).map_err(|_| "set_rf_frequency failed")?;
+        self.radio.set_standby(StandbyClk::Hse).map_err(|_| "set_standby Hse failed")?;
+        Ok(self.get_frequency())
+    }
+
+    pub fn get_tx_power(&mut self) -> String<100> {
+        let mut output_str: String<100> = String::new();
+        let pa = &self.config.pa_cfg;
+        let hp_max = pa.as_slice()[2];
+        let power_dbm = match hp_max {
+            0x7 => 22,
+            0x5 => 20,
+            0x3 => 17,
+            0x2 => 14,
+            _ => 0,
+        };
+        write!(&mut output_str, "{}", power_dbm).unwrap();
+        output_str
+    }
+
+    pub fn set_tx_power(&mut self, power_dbm: u32) -> Result<String<100>, &str> {
+        let (pa_cfg, tx_params) = match power_dbm {
+            22 => (PaConfig::HP_22, TxParams::HP),
+            20 => (PaConfig::HP_20, TxParams::HP),
+            17 => (PaConfig::HP_17, TxParams::HP),
+            14 => (PaConfig::HP_14, TxParams::HP),
+            _ => return Err("Supported power levels: 14, 17, 20, 22 dBm"),
+        };
+        self.config.pa_cfg = pa_cfg;
+        self.config.tx_params = tx_params;
+        self.radio.set_standby(StandbyClk::Rc).map_err(|_| "set_standby Rc failed")?;
+        self.radio.set_pa_config(&self.config.pa_cfg).map_err(|_| "set_pa_config failed")?;
+        self.radio.set_tx_params(&self.config.tx_params).map_err(|_| "set_tx_params failed")?;
+        self.radio.set_standby(StandbyClk::Hse).map_err(|_| "set_standby Hse failed")?;
+        Ok(self.get_tx_power())
+    }
+
+    pub fn get_version(&mut self) -> String<100> {
+        String::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| String::try_from("unknown").unwrap())
+    }
+
+    pub fn get_bandwidth(&mut self) -> String<100> {
+        let mut output_str: String<100> = String::new();
+        let mod_params = self.config.mod_params.as_slice();
+        let bw_val = if mod_params.len() > 1 { mod_params[1] } else { 0x04 };
+        let bw_khz = match bw_val {
+            0x00 => 7,   // Bw7
+            0x08 => 10,  // Bw10
+            0x01 => 15,  // Bw15
+            0x09 => 20,  // Bw20
+            0x02 => 31,  // Bw31
+            0x0A => 41,  // Bw41
+            0x03 => 62,  // Bw62
+            0x04 => 125, // Bw125
+            0x05 => 250, // Bw250
+            0x06 => 500, // Bw500
+            _ => 125,
+        };
+        write!(&mut output_str, "{}", bw_khz).ok();
+        output_str
+    }
+
+    pub fn set_bandwidth(&mut self, bw_khz: u32) -> Result<String<100>, &str> {
+        let bw = match bw_khz {
+            7 => LoRaBandwidth::Bw7,
+            10 => LoRaBandwidth::Bw10,
+            15 => LoRaBandwidth::Bw15,
+            20 => LoRaBandwidth::Bw20,
+            31 => LoRaBandwidth::Bw31,
+            41 => LoRaBandwidth::Bw41,
+            62 => LoRaBandwidth::Bw62,
+            125 => LoRaBandwidth::Bw125,
+            250 => LoRaBandwidth::Bw250,
+            500 => LoRaBandwidth::Bw500,
+            _ => return Err("Supported BW: 7, 10, 15, 20, 31, 41, 62, 125, 250, 500 kHz"),
+        };
+        self.config.mod_params = self.config.mod_params.set_bw(bw);
+        self.radio.set_standby(StandbyClk::Rc).map_err(|_| "set_standby Rc failed")?;
+        self.radio.set_lora_mod_params(&self.config.mod_params).map_err(|_| "set_lora_mod_params failed")?;
+        self.radio.set_standby(StandbyClk::Hse).map_err(|_| "set_standby Hse failed")?;
+        Ok(self.get_bandwidth())
+    }
+
+    pub fn get_coding_rate(&mut self) -> String<100> {
+        let mut output_str: String<100> = String::new();
+        // LoRaModParams byte layout: [SF, BW, CR, LDRO]
+        let mod_params = self.config.mod_params.as_slice();
+        // CR is typically at index 2 in the raw bytes
+        let cr_val = if mod_params.len() > 2 { mod_params[2] } else { 0x01 };
+        let cr_denom = match cr_val {
+            0x00 => 4, // Cr44
+            0x01 => 5, // Cr45
+            0x02 => 6, // Cr46
+            0x03 => 7, // Cr47
+            0x04 => 8, // Cr48
+            _ => 5,
+        };
+        write!(&mut output_str, "4/{}", cr_denom).ok();
+        output_str
+    }
+
+    pub fn set_coding_rate(&mut self, cr_denom: u32) -> Result<String<100>, &str> {
+        let cr = match cr_denom {
+            4 => CodingRate::Cr44,
+            5 => CodingRate::Cr45,
+            6 => CodingRate::Cr46,
+            7 => CodingRate::Cr47,
+            8 => CodingRate::Cr48,
+            _ => return Err("Supported CR: 4/4, 4/5, 4/6, 4/7, 4/8 (use denominator 4-8)"),
+        };
+        self.config.mod_params = self.config.mod_params.set_cr(cr);
+        self.radio.set_standby(StandbyClk::Rc).map_err(|_| "set_standby Rc failed")?;
+        self.radio.set_lora_mod_params(&self.config.mod_params).map_err(|_| "set_lora_mod_params failed")?;
+        self.radio.set_standby(StandbyClk::Hse).map_err(|_| "set_standby Hse failed")?;
+        Ok(self.get_coding_rate())
+    }
+
     // Radio interrupt handler
     pub fn locked_radio_irq_handler(&mut self, millis: TimeType) -> RadioState
     {
@@ -253,7 +390,7 @@ impl RadioControl {
             self.current_state = RadioState::Idle;
 
             // Go back to RX mode
-            self.do_receive();
+            let _ = self.do_receive();
         } else if irq_status & Irq::PreambleDetected.mask() != 0 {
             defmt::info!("Preamble detect: {:#X} {}", irq_status, status);
             unwrap!(self.radio.clear_irq_status(Irq::PreambleDetected.mask())); 
@@ -289,7 +426,7 @@ impl RadioControl {
             // Clear IRQ
             unwrap!(self.radio.clear_irq_status(Irq::RxDone.mask()));   
             // Start another receieve
-            self.do_receive();         
+            let _ = self.do_receive();         
         } else if irq_status & Irq::Timeout.mask() != 0 {
             defmt::warn!("Timeout {}", self.radio.op_error());
             unwrap!(self.radio.clear_irq_status(Irq::Timeout.mask()));
@@ -334,18 +471,18 @@ impl RadioControl {
 
     fn do_transmit(&mut self, data: &[u8], len: u8) -> Result<(), &str> {
         // Take radio out of RX
-        unwrap!(self.radio.set_standby(StandbyClk::Hse));
+        self.radio.set_standby(StandbyClk::Hse).map_err(|_| "set_standby Hse failed")?;
 
         // Set RF switch
         self.configure_rf_switch(RfSwitchType::TxHp);
 
         // Load packet in buffer and bytes to send
-        unwrap!(self.radio.write_buffer(0, data));
+        self.radio.write_buffer(0, data).map_err(|_| "write_buffer failed")?;
         self.config.pkt_params = self.config.pkt_params.set_payload_len(len);
-        unwrap!(self.radio.set_lora_packet_params(&self.config.pkt_params));
+        self.radio.set_lora_packet_params(&self.config.pkt_params).map_err(|_| "set_lora_packet_params failed")?;
 
         // Start TX
-        unwrap!(self.radio.set_tx(Timeout::from_duration_sat(Duration::from_secs(15))));
+        self.radio.set_tx(Timeout::from_duration_sat(Duration::from_secs(15))).map_err(|_| "set_tx failed")?;
 
         // Set internal state
         self.current_state = RadioState::Transmitting;
@@ -353,14 +490,15 @@ impl RadioControl {
         Ok(())
     }
 
-    fn do_receive(&mut self) {
+    fn do_receive(&mut self) -> Result<(), &str> {
         // Set rf switch
         self.configure_rf_switch(RfSwitchType::Rx);
         // Set for full length read
         self.config.pkt_params = self.config.pkt_params.set_payload_len(255);
-        unwrap!(self.radio.set_lora_packet_params(&self.config.pkt_params));
+        self.radio.set_lora_packet_params(&self.config.pkt_params).map_err(|_| "set_lora_packet_params failed")?;
         // Start read
-        unwrap!(self.radio.set_rx(Timeout::DISABLED));
+        self.radio.set_rx(Timeout::DISABLED).map_err(|_| "set_rx failed")?;
+        Ok(())
     }
 
     // Function to toggle GPIO's for RF switch specific to Lora-E5 hardware.

@@ -1,9 +1,12 @@
 use heapless::{self, String, Vec}; // fixed capacity `std::Vec`
 use defmt::{write, unwrap};
 
-// TODO - figure out max resp size. Currently recv msg can be payload of 200 + w/e
-// Configurable hard coded max at command length
-const MAX_AT_CMD_CHARS: usize = 300;
+// Max AT command/response size calculation:
+// - AT+MSEND input: "AT+MSEND=" (9) + dest_id (10) + ",true,7," (8) + payload (200) = 227
+// - AT+MRECV response: "\n\r+" (3) + originator (10) + ",7,-128,200," (16) + payload (200) + "\n\rOK\n\r>" (8) = 237
+// - Routing table/other responses well under 100 chars
+// 250 provides ~13 chars headroom
+const MAX_AT_CMD_CHARS: usize = 250;
 
 // AT Command buffer type
 pub type AtCmdStr = String<MAX_AT_CMD_CHARS>;
@@ -20,10 +23,15 @@ const CONST_AT_COMMAND_STRINGS: &'static [&'static [&str]] =
     &["AT+MRECV", "+RX: ", "Command to receive message from network.", "N"],
     &["AT+MSEND", "", "Command to send message over mesh network.\n\rFormat: <dest id>,<ack required>,<ttl>,<payload>", "Y"],
     &["AT+TMSG", "+", "Command to send \"Hello World\".", "N"],
-    &["AT+RCFG", "+CFG", "Command to get/set radio config.\n\rFormat:AT+RCFG=<sub cmd>,<sub value>\n\rSub Commands: FREQ|SF|CR|BW|PWR", "N"],    
+    &["AT+FREQ", "+FREQ:", "Command to get/set frequency (Hz).\n\rFormat: AT+FREQ=<frequency>", "Y"],    
+    &["AT+PWR", "+PWR:", "Command to get/set TX power (dBm).\n\rFormat: AT+PWR=<power>", "Y"],
+    &["AT+VER", "VER:", "Command to get firmware version.", "N"],
+    &["AT+BW", "+BW:", "Command to get/set LoRa bandwidth (kHz).\n\rFormat: AT+BW=<7|10|15|20|31|41|62|125|250|500>", "Y"],
+    &["AT+CR", "+CR:", "Command to get/set LoRa coding rate (4/x).\n\rFormat: AT+CR=<4|5|6|7|8>", "Y"],
     &["AT+RING", "+RING: ", "Command to enable/disable ring indicator.", "Y"],
-    &["AT+RTABLE", "", "Command to print out routing table.", "N"],
-    &["AT+ST", "+", "Command to get radio status.", "N"],
+    &["AT+ROUTES", "+ROUTES:", "Command to show detailed route info per node (RSSI, distance, routes).", "N"],
+    &["AT+NODES", "+NODES:", "Command to print out node list.", "N"],
+    &["AT+ST", "+ST:", "Command to get radio status.", "N"],
     &["AT?", "", "Command to get list of available commands.", "N"],
 ];
 
@@ -43,10 +51,15 @@ pub enum AtCommandSet {
     AtMsgReceive,
     AtMsgSend,
     TestMessage,
-    RadioConfiguration,
+    AtFreq,
+    AtPwr,
+    AtVer,
+    AtBw,
+    AtCr,
     RingIndicator,
-    RoutingTable,
-    RadioStatus,
+    AtRoutes,
+    AtNodes,
+    AtSt,
     AtList,
 
     // Below are not in CONST_AT_COMMAND_STRINGS
@@ -65,12 +78,17 @@ impl defmt::Format for AtCommandSet {
             AtCommandSet::AtMsgReceive => write!(fmt, "AtMsgReceive"),
             AtCommandSet::AtMsgSend => write!(fmt, "AtMsgSend"),
             AtCommandSet::TestMessage => write!(fmt, "TestMessage"),
-            AtCommandSet::RadioConfiguration => write!(fmt, "RadioConfiguration"),
+            AtCommandSet::AtFreq => write!(fmt, "AtFreq"),
+            AtCommandSet::AtPwr => write!(fmt, "AtPwr"),
+            AtCommandSet::AtVer => write!(fmt, "AtVer"),
+            AtCommandSet::AtBw => write!(fmt, "AtBw"),
+            AtCommandSet::AtCr => write!(fmt, "AtCr"),
             AtCommandSet::RingIndicator => write!(fmt, "RingIndicator"),
-            AtCommandSet::RoutingTable => write!(fmt, "RoutingTable"),
-            AtCommandSet::RadioStatus => write!(fmt, "RadioStatus"),
-
+            AtCommandSet::AtRoutes => write!(fmt, "AtRoutes"),
+            AtCommandSet::AtNodes => write!(fmt, "AtNodes"),
+            AtCommandSet::AtSt => write!(fmt, "AtSt"),
             AtCommandSet::AtList => write!(fmt, "AtList"),
+
             AtCommandSet::NewLine => write!(fmt, "NewLine"),
             _ => { write!(fmt, "Unknown") }
         }
@@ -91,12 +109,17 @@ impl AtCommandSet {
             5 => AtCommandSet::AtMsgReceive,
             6 => AtCommandSet::AtMsgSend,
             7 => AtCommandSet::TestMessage,
-            8 => AtCommandSet::RadioConfiguration,
-            9 => AtCommandSet::RingIndicator,
-            10 => AtCommandSet::RoutingTable,
-            11 => AtCommandSet::RadioStatus,
-            12 => AtCommandSet::AtList,
-            13 => AtCommandSet::NewLine,
+            8 => AtCommandSet::AtFreq,
+            9 => AtCommandSet::AtPwr,
+            10 => AtCommandSet::AtVer,
+            11 => AtCommandSet::AtBw,
+            12 => AtCommandSet::AtCr,
+            13 => AtCommandSet::RingIndicator,
+            14 => AtCommandSet::AtRoutes,
+            15 => AtCommandSet::AtNodes,
+            16 => AtCommandSet::AtSt,
+            17 => AtCommandSet::AtList,
+            18 => AtCommandSet::NewLine,
             _ => AtCommandSet::Unknown,
         }
     }
@@ -153,3 +176,7 @@ impl AtCommandSet {
         }
     }
 }
+
+// Compile-time assertion: verify enum count matches array count
+const _: () = assert!(CONST_AT_COMMAND_STRINGS.len() == 18, 
+    "CONST_AT_COMMAND_STRINGS length must match AtCommandSet enum variants (excluding NewLine/Unknown)");
